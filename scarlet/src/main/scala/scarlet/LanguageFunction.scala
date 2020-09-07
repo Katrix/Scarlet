@@ -2,19 +2,26 @@ package scarlet
 
 import java.io.InputStream
 
-import scala.collection.immutable.LongMap
+import cats.arrow.FunctionK
 
+import scala.collection.immutable.LongMap
 import cats.data.Validated.Valid
 import cats.data.{EitherNel, ValidatedNel, NonEmptyList => NEL}
 import cats.syntax.all._
-import scarlet.classfile.denormalized.attribute.{Code, NamedAttributeCompanion}
+import fansi.Str
+import org.apache.commons.text.StringEscapeUtils
+import scarlet.classfile.denormalized.attribute.{Code, MethodParameters, NamedAttributeCompanion}
 import scarlet.classfile.denormalized.opcodes.{OPCode => DeOPCode}
 import scarlet.classfile.denormalized.{Classfile => DenormClassfile}
 import scarlet.classfile.raw.{ClassfileCodec, Classfile => RawClassfile}
 import scarlet.graph.{CFG, OPCodeCFG}
-import scarlet.ir.OPCodeToSIR.{CodeWithStack => SIRCode}
+import scarlet.ir.OPCodeToSIR.{StackFrame, CodeWithStack => SIRCode}
 import scarlet.ir.{ClassfileWithData, FieldWithData, MethodWithData, OPCodeToSIR}
 import scodec.Err
+
+import scalax.collection._
+import scalax.collection.GraphEdge._
+import scalax.collection.io.dot._
 
 trait LanguageFunction[I, O] { self =>
 
@@ -168,67 +175,38 @@ object LanguageFunction {
     override def process(
         in: ClassfileWithData[Unit, Unit, NEL[String], SIRCode]
     ): EitherNel[String, ClassfileWithData[Unit, Unit, NEL[String], LongMap[Vector[String]]]] = {
-      Right(in.rightmapMethod { code =>
+      Right(in.rightmapMethodWithMethod { (method, code) =>
+        implicit val extra: ir.SIR.SyntaxExtra = ir.SIR.SyntaxExtra(method.attributes.collectFirst {
+          case params: MethodParameters => params
+        })
         code.map {
-          case (k, (_, _, v, _)) =>
-            val lines = v.flatMap {
-              case ir.SIR.Nop                         => Nil
-              case ir.SIR.MaybeInit(clazz)            => Seq(s"${clazz.name}.<clinit>")
-              case ir.SIR.NotNull(expr)               => Seq(s"notNull(${expr.toSyntax})")
-              case ir.SIR.NotZero(expr)               => Seq(s"notZero(${expr.toSyntax})")
-              case ir.SIR.NotNegative(e)              => Seq(s"notNegative(${e.toSyntax})")
-              case ir.SIR.SetLocal(index, e)          => Seq(s"var var_$index = ${e.toSyntax}")
-              case ir.SIR.SetStackLocal(index, pc, e) => Seq(s"var stack_${index}_$pc = ${e.toSyntax}")
-              case ir.SIR.SetArray(arr, idx, obj)     => Seq(s"${arr.toSyntax}[${idx.toSyntax}] = ${obj.toSyntax}")
-              case ir.SIR.SetField(e, f, fieldRefInfo) =>
-                Seq(s"${e.toSyntax}.${fieldRefInfo.nameAndType.name} = (${f.toSyntax})")
-              case ir.SIR.SetStatic(fieldRefInfo, e) =>
-                Seq(s"${fieldRefInfo.clazz.name}.${fieldRefInfo.nameAndType.name} = ${e.toSyntax}")
-              case ir.SIR.New(varIndex, clazz, variables) =>
-                Seq(s"var local_$varIndex = new ${clazz.name}(${variables.map(_.toSyntax).mkString(", ")})")
-              case ir.SIR.CallSuper(e, variables) =>
-                Seq(s"${e.toSyntax}.super(${variables.map(_.toSyntax).mkString(", ")})")
-              case ir.SIR.Call(varIndex, _, clazz, name, _, None, variables) =>
-                Seq(s"var local_$varIndex = ${clazz.name}.$name(${variables.map(_.toSyntax).mkString(", ")})")
-              case ir.SIR.Call(varIndex, _, _, name, _, Some(obj), variables) =>
-                Seq(s"var local_$varIndex = ${obj.toSyntax}.$name(${variables.map(_.toSyntax).mkString(", ")})")
-              case ir.SIR.NewArray(varIndex, size, arrTpe) =>
-                Seq(s"var local_$varIndex = new ${arrTpe.describe}[${size.toSyntax}]")
-              case ir.SIR.NewMultiArray(varIndex, tpe, sizesExpr) =>
-                def underlyingTpe(tpe: ir.SIR.Type.Aux[_]): ir.SIR.Type = tpe match {
-                  case ir.SIR.Type.Array(inner) => underlyingTpe(inner)
-                  case _                        => tpe
-                }
-
-                val dimensionsBrackets = sizesExpr.map(e => s"[${e.toSyntax}]").mkString
-
-                Seq(s"var local_$varIndex = new ${underlyingTpe(tpe).describe}$dimensionsBrackets")
-              case ir.SIR.If(expr, branchPC) => Seq(s"if(${expr.toSyntax}) goto $branchPC")
-              case ir.SIR.Switch(expr, defaultPC, pairs) =>
-                val gotos = pairs.map {
-                  case (offset, pc) => s"case $offset: goto $pc"
-                }
-
-                s"switch(${expr.toSyntax}) {" +: gotos :+ s"default: goto $defaultPC" :+ "}"
-              case ir.SIR.Goto(branchPC)     => Seq(s"goto $branchPC")
-              case ir.SIR.Return(Some(expr)) => Seq(s"return ${expr.toSyntax}")
-              case ir.SIR.Return(None)       => Seq("return")
-              case ir.SIR.MonitorEnter(e)    => Seq(s"${e.toSyntax}.synchronizedStart")
-              case ir.SIR.MonitorExit(e)     => Seq(s"${e.toSyntax}.synchronizedEnd")
-            }
-
-            k -> lines
+          case (k, StackFrame(_, _, v, _)) =>
+            k -> v.flatMap(ir.SIR.toSyntax)
         }
-
       })
     }
 
-    override def print(out: ClassfileWithData[Unit, Unit, NEL[String], LongMap[Vector[String]]]): fansi.Str = {
+    override def print(out: ClassfileWithData[Unit, Unit, NEL[String], LongMap[Vector[String]]]): fansi.Str =
       Scarlet.printer(
         out.rightmapMethod(code => code.values.flatten.mkString("\n"))
       )
-    }
   }
+
+  private def cfgDotEdgeTransformer(
+      root: DotRootGraph
+  )(innerEdge: Graph[CFG.CodeBasicBlock, DiEdge]#EdgeT): Option[(DotGraph, DotEdgeStmt)] =
+    innerEdge.edge match {
+      case DiEdge(source, target) =>
+        Some(
+          (
+            root,
+            DotEdgeStmt(
+              NodeId(source.value.code.head._1),
+              NodeId(target.value.code.head._1)
+            )
+          )
+        )
+    }
 
   object `SIR-CFG`
       extends LanguageFunction[ClassfileWithData[Unit, Unit, NEL[String], SIRCode], ClassfileWithData[
@@ -242,16 +220,105 @@ object LanguageFunction {
     ): EitherNel[String, ClassfileWithData[Unit, Unit, NEL[String], graph.CFG[graph.CFG.CodeBasicBlock]]] = {
       Right(
         in.rightmapMethod { sirCode =>
-          val redistributed = ???
+          def remapExprJump[B](expr: ir.SIR.Expr[B]): ir.SIR.Expr[B] = expr match {
+            case ir.SIR.Expr.GetStackLocal(index, jumpTarget, tpe) =>
+              ir.SIR.Expr.GetStackLocal(index, jumpTarget * 1000, tpe)
+            case other => other.modifyChildren(FunctionK.lift(remapExprJump))
+          }
 
-          CFG.createFromSIR(redistributed)
+          def remapJump(op: ir.SIR): ir.SIR = op match {
+            case ir.SIR.SetStackLocal(index, pc, e) => ir.SIR.SetStackLocal(index, pc * 1000, remapExprJump(e))
+            case ir.SIR.If(expr, branchPC)          => ir.SIR.If(remapExprJump(expr), branchPC * 1000)
+            case ir.SIR.Switch(expr, defaultPC, pairs) =>
+              ir.SIR.Switch(remapExprJump(expr), defaultPC * 1000, pairs.map(t => t._1 -> t._2 * 1000))
+            case ir.SIR.Goto(branchPC) => ir.SIR.Goto(branchPC * 1000)
+            case op                    => op.modifyExpr(FunctionK.lift(remapExprJump))
+          }
+
+          //TODO: Remap better
+          val remaped =
+            sirCode.flatMap(t1 => t1._2.code.zipWithIndex.map(t2 => (t1._1 * 1000 + t2._2) -> remapJump(t2._1)))
+
+          CFG.createFromSIR(remaped)
         }
       )
     }
 
     override def print(
         out: ClassfileWithData[Unit, Unit, NEL[String], graph.CFG[graph.CFG.CodeBasicBlock]]
-    ): fansi.Str =
+    ): fansi.Str = {
+      val dotOut = out.rightmapMethod { cfg =>
+        val root = DotRootGraph(directed = true, Some(Id("CodeCFG")))
+
+        def nodeTransformer(innerNode: Graph[CFG.CodeBasicBlock, DiEdge]#NodeT): Option[(DotGraph, DotNodeStmt)] =
+          Some(
+            (
+              root,
+              DotNodeStmt(
+                NodeId(innerNode.value.code.head._1),
+                Seq(
+                  DotAttr(
+                    Id("label"),
+                    Id(innerNode.value.code.map(t => s"${t._1}: ${t._2}").mkString("<", "<BR />", ">"))
+                  )
+                )
+              )
+            )
+          )
+
+        cfg.graph.toDot(root, cfgDotEdgeTransformer(root), cNodeTransformer = Some(nodeTransformer))
+      }
+
+      Scarlet.printer(dotOut)
+    }
+  }
+
+  object `SIR-CFG-Syntax`
+      extends LanguageFunction[
+        ClassfileWithData[Unit, Unit, NEL[String], graph.CFG[graph.CFG.CodeBasicBlock]],
+        ClassfileWithData[Unit, Unit, NEL[String], String]
+      ] {
+    override def process(
+        in: ClassfileWithData[Unit, Unit, NEL[String], CFG[CFG.CodeBasicBlock]]
+    ): EitherNel[String, ClassfileWithData[Unit, Unit, NEL[String], String]] =
+      Right(
+        in.rightmapMethodWithMethod { (method, cfg) =>
+          val root = DotRootGraph(directed = true, Some(Id("CodeCFG")))
+
+          implicit val extra: ir.SIR.SyntaxExtra = ir.SIR.SyntaxExtra(method.attributes.collectFirst {
+            case params: MethodParameters => params
+          })
+
+          def nodeTransformer(innerNode: Graph[CFG.CodeBasicBlock, DiEdge]#NodeT): Option[(DotGraph, DotNodeStmt)] =
+            Some(
+              (
+                root,
+                DotNodeStmt(
+                  NodeId(innerNode.value.code.head._1),
+                  Seq(
+                    DotAttr(
+                      Id("label"),
+                      Id(
+                        innerNode.value.code
+                          .flatMap(t => ir.SIR.toSyntax(t._2))
+                          .map(StringEscapeUtils.escapeHtml4)
+                          .mkString("<", "<BR />", ">")
+                      )
+                    ),
+                    DotAttr(
+                      Id("xlabel"),
+                      Id(innerNode.value.code.head._1)
+                    )
+                  )
+                )
+              )
+            )
+
+          cfg.graph.toDot(root, cfgDotEdgeTransformer(root), cNodeTransformer = Some(nodeTransformer))
+        }
+      )
+
+    override def print(out: ClassfileWithData[Unit, Unit, NEL[String], String]): Str =
       Scarlet.printer(out)
   }
 }

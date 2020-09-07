@@ -38,9 +38,9 @@ object CFG {
     }
 
     val leaders = (code.head._1 +: gotoLeaders.toVector).distinct.sorted
-
-    val basicBlocks = leaders
-      .sliding(2)
+    val basicBlocks = (
+      leaders.sliding(2) ++ (if (leaders.length > 1) Vector(Vector(leaders.last)) else Nil)
+    )
       .map {
         case Seq(current, next) => code.view.filterKeys(k => k >= current && k < next)
         case Seq(current)       => code.view.filterKeys(k => k >= current) //Last leader
@@ -54,7 +54,7 @@ object CFG {
       case _       => false
     }
 
-    def branchTo(code: SIR): Seq[Long] = code match {
+    def branchesFrom(code: SIR): Seq[Long] = code match {
       case Goto(branchPC)              => Seq(branchPC)
       case If(_, branchPC)             => Seq(branchPC)
       case Switch(_, defaultPC, pairs) => pairs.map(_._2) :+ defaultPC
@@ -68,10 +68,10 @@ object CFG {
 
     val edges = basicBlockProduct.flatMap {
       case (b1 @ CodeBasicBlock(Last((b1Addr, b1Op))), b2 @ CodeBasicBlock(First((b2Addr, _))))
-          if b1Addr + 1 == b2Addr && !isUnconditionalBranch(b1Op) =>
+          if (b1Addr - (b1Addr % 1000)) + 1000 == b2Addr && !isUnconditionalBranch(b1Op) =>
         Seq(b1 ~> b2)
       case (b1 @ CodeBasicBlock(Last((_, b1Op))), b2 @ CodeBasicBlock(First((b2Addr, _))))
-          if branchTo(b1Op).contains(b2Addr) =>
+          if branchesFrom(b1Op).contains(b2Addr) =>
         Seq(b1 ~> b2)
       case _ => Nil
     }

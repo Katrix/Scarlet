@@ -12,4 +12,7 @@ case class MethodWithData[E, A](
 ) {
 
   def map[E2, A2](f: Either[E, A] => Either[E2, A2]): MethodWithData[E2, A2] = copy(data = f(data))
+
+  def mapWithMethod[E2, A2](f: (MethodWithData[E, A], Either[E, A]) => Either[E2, A2]): MethodWithData[E2, A2] =
+    copy(data = f(this, data))
 }

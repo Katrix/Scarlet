@@ -59,6 +59,11 @@ object ScarletLanguage extends StringEnum[ScarletLanguage[_]] {
     override def langFunction: LanguageFunction[InputStream, SIRCFGOutput] =
       SIR.langFunction.andThenMapping(_.leftmapMethod(_._1))(LanguageFunction.`SIR-CFG`)
   }
+  type SIRCFGSyntaxOutput = ClassfileWithData[Unit, Unit, NEL[String], String]
+  case object SIRCFGSyntax extends ScarletLanguage[SIRCFGSyntaxOutput]("sir-cfg-syntax") {
+    override def langFunction: LanguageFunction[InputStream, SIRCFGSyntaxOutput] =
+      SIRCFG.langFunction.andThen(LanguageFunction.`SIR-CFG-Syntax`)
+  }
   //case object TIR            extends ScarletLanguage
   //case object TIRSyntax      extends ScarletLanguage
   //case object Java           extends ScarletLanguage

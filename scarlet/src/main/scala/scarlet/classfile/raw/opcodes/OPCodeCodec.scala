@@ -380,7 +380,7 @@ object OPCodeCodec {
     */
   val opCodesCodec: Codec[LongMap[OPCode]] =
     new Codec[LongMap[OPCode]] {
-      override def sizeBound: SizeBound = SizeBound.unknown
+      override def sizeBound: SizeBound = SizeBound.atMost(65534L * 8L)
 
       private val tableSwitchIdVec  = BitVector.fromByte(tableSwitchId.toByte)
       private val lookupSwitchIdVec = BitVector.fromByte(lookupSwitchId.toByte)
@@ -431,7 +431,9 @@ object OPCodeCodec {
         var error: Option[Err] = None
         var decodedBytes       = 0L
 
-        while (count < maxCount && remaining.nonEmpty) {
+        // Max method size is 65534 bytes
+        // https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html#jvms-4.7.3
+        while (decodedBytes < 65534 && remaining.nonEmpty) {
           if (remaining.startsWith(tableSwitchIdVec) || remaining.startsWith(lookupSwitchIdVec)) {
             val modDecoded = decodedBytes     % 4
             val padding    = (4 - modDecoded) % 4
@@ -450,7 +452,7 @@ object OPCodeCodec {
               decodedBytes += decodedAmount
               remaining = rest
             case Attempt.Failure(err) =>
-              error = Some(err.pushContext(count.toString))
+              error = Some(err.pushContext(count.toString).pushContext(java.lang.Long.toHexString(decodedBytes)))
               remaining = BitVector.empty
           }
         }

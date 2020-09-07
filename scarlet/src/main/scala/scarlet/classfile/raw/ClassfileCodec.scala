@@ -35,7 +35,7 @@ object ClassfileCodec {
       var remaining          = bits
       var count              = 1
       var error: Option[Err] = None
-      while (count < maxSize && remaining.nonEmpty) {
+      while (count < maxSize) {
         constantPoolEntry.decode(remaining) match {
           case Attempt.Successful(DecodeResult(value, rest)) =>
             bldr += value

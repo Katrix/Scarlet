@@ -19,7 +19,8 @@ object OPCodeToSIR {
 
   type Stack = List[Expr[_]]
 
-  type CodeWithStack = LongMap[(Stack, OPCode, Vector[SIR], Stack)]
+  case class StackFrame(before: Stack, op: OPCode, code: Vector[SIR], after: Stack)
+  type CodeWithStack = LongMap[StackFrame]
 
   def convert(
       code: LongMap[OPCode],
@@ -39,7 +40,7 @@ object OPCodeToSIR {
 
     def newStackJump(jumpTarget: Long, code: CodeWithStack): Stack =
       code.values
-        .flatMap(_._3)
+        .flatMap(_.code)
         .collect {
           case SIR.SetStackLocal(index, `jumpTarget`, e) => Expr.GetStackLocal(index, jumpTarget, e.tpe)
         }
@@ -47,8 +48,7 @@ object OPCodeToSIR {
 
     code.toVector
       .foldLeft(
-        (List.empty[Expr[_]], LongMap.empty[(Stack, OPCode, Vector[SIR], Stack)], 0)
-          .asRight[(String, CodeWithStack)]
+        (List.empty[Expr[_]], LongMap.empty[StackFrame], 0).asRight[(String, CodeWithStack)]
       ) {
         case (Right((inStack, irMap, tempVarCount)), (pc, opcode)) =>
           val succ = opcodecfg.cfg.get(pc).diSuccessors.map(_.value)
@@ -69,7 +69,7 @@ object OPCodeToSIR {
               s"Non empty stack backwards jump at $pc with succ $succ"
             )
             nextStack = if (succ.contains(pc + 1) && !jumpTargets.contains(pc + 1)) outStack else Nil
-          } yield (nextStack, irMap.updated(pc, (inStack, opcode, newIr, outStack)), newTempVarCount)
+          } yield (nextStack, irMap.updated(pc, StackFrame(inStack, opcode, newIr, outStack)), newTempVarCount)
 
           res.leftMap(_ -> irMap)
         case (Left(e), (_, _)) => Left(e)

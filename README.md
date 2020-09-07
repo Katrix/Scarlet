@@ -20,8 +20,8 @@ The complete list is.
 * `bytecode-syntax`: TODO
 * `sir`: Scarlet's first IR. A stackless IR, close to but not exactly the same as bytecode. Based on the IR from this [paper](http://people.irisa.fr/David.Pichardie/papers/aplas10.pdf)
 * `sir-syntax`: Same as `sir`, but prints it in a more readable format, looking more like normal code.
-* `sir-cfg`: TODO
-* `sir-cfg-syntax`: TODO
+* `sir-cfg`: DOT file with SIR organized by control flow graph.
+* `sir-cfg-syntax`: DOT file with SIR syntax organized by control flow graph.
 
 ## Stuff that still needs to be done
 * [ ] Structuring

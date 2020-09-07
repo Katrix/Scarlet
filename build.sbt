@@ -16,6 +16,7 @@ lazy val scarlet = project.settings(
   libraryDependencies += "org.typelevel"    %% "cats-core"  % "2.2.0",
   libraryDependencies += "com.chuusai"      %% "shapeless"  % "2.3.3",
   libraryDependencies += "org.scala-graph"  %% "graph-core" % "1.13.2",
+  libraryDependencies += "org.scala-graph"  %% "graph-dot"  % "1.13.0",
   libraryDependencies += "com.github.scopt" %% "scopt"      % "4.0.0-RC2",
   scalacOptions ++= Seq(
     "-deprecation",

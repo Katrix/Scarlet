@@ -8,6 +8,12 @@ import scodec.bits.ByteVector
 import scodec._
 import scodec.codecs._
 
+/**
+  * An attribute that has not been parsed or exapnded, either because it's unknown,
+  * or because it's companion wasn't specified when expanding attributes.
+  * @param name The name of the attribute
+  * @param data The raw data of the attribute
+  */
 case class Unknown(name: String, data: ByteVector) extends Attribute {
   private def decodeData[A](codec: Codec[A]) = codec.complete.decodeValue(data.bits).toEither.toValidatedNel
 

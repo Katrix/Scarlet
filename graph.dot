@@ -1,0 +1,10 @@
+digraph CodeCFG {
+	0 -> 11000
+	0 -> 3000
+	3000 -> 12000
+	3000 [label = <notNull(this)<BR />var local_0 = this.fac(((a: Int) - (1: Int)))<BR />var stack_0_12000 = ((a: Int) * (local_0: Unknown))<BR />goto 12000>, xlabel = 3000]
+	12000 [label = <return (stack_0_12000: Int)>, xlabel = 12000]
+	11000 [label = <var stack_0_12000 = (1: Int)>, xlabel = 11000]
+	11000 -> 12000
+	0 [label = <if(((a: Int) &lt;= (1: Int))) goto 11000>, xlabel = 0]
+}
