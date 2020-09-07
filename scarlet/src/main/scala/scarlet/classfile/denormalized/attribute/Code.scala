@@ -95,7 +95,7 @@ object Code extends NamedAttributeCompanion[Code] {
                           case RefIfCmp(cond, branchAddress)  => RefIfCmp(cond, getNewAddress(branchAddress))
                           case Goto(branchAddress)            => Goto(getNewAddress(branchAddress))
                           case Switch(defaultAddress, pairs) =>
-                            Switch(defaultAddress, pairs.map(t => t._1 -> getNewAddress(t._2)))
+                            Switch(getNewAddress(defaultAddress), pairs.map(t => t._1 -> getNewAddress(t._2)))
                           case _ => op
                         }
                         getNewAddress(k) -> substitutedOp

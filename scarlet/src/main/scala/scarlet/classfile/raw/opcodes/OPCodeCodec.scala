@@ -427,7 +427,6 @@ object OPCodeCodec {
         val bldr               = LongMap.newBuilder[OPCode]
         var remaining          = bits
         var count              = 0
-        val maxCount           = Int.MaxValue
         var error: Option[Err] = None
         var decodedBytes       = 0L
 
@@ -435,11 +434,15 @@ object OPCodeCodec {
         // https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html#jvms-4.7.3
         while (decodedBytes < 65534 && remaining.nonEmpty) {
           if (remaining.startsWith(tableSwitchIdVec) || remaining.startsWith(lookupSwitchIdVec)) {
-            val modDecoded = decodedBytes     % 4
-            val padding    = (4 - modDecoded) % 4
+            //We add one here to account for the switch OPCode
+            val modDecoded = (decodedBytes + 1) % 4
+            val padding    = (4 - modDecoded)   % 4
             decodedBytes += padding
 
-            remaining = remaining.drop(padding * 8)
+            val idToAddBack = if (remaining.startsWith(tableSwitchIdVec)) tableSwitchIdVec else lookupSwitchIdVec
+
+            //We add one here to also drop the switch OpCode. We then add it back
+            remaining = idToAddBack ++ remaining.drop((padding + 1) * 8)
           }
 
           codec.decode(remaining) match {

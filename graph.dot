@@ -1,10 +1,56 @@
-digraph CodeCFG {
-	2000 -> 14000
-	2000 -> 5000
-	14000 [label = <return (var_2: Int)>, xlabel = 14000]
-	5000 -> 2000
-	5000 [label = <scala/Predef$.&lt;clinit&gt;<BR />var local_0 = scala/runtime/BoxesRunTime.boxToInteger((var_2: Int))<BR />notNull((scala/Predef$.MODULE$: scala/Predef$))<BR />var local_1 = (scala/Predef$.MODULE$: scala/Predef$).println((local_0: Unknown))<BR />var var_2 = ((var_2: Int) + (1: Int))<BR />goto 2000>, xlabel = 5000]
-	0 [label = <var var_2 = (0: Int)>, xlabel = 0]
-	0 -> 2000
-	2000 [label = <if(((var_2: Int) &gt;= (max: Int))) goto 14000>, xlabel = 2000]
+digraph matchInt1 {
+	6000 [label = <var stack_0_12000 = (10: Int)<BR />goto 12000>, xlabel = 6000]
+	8000 [label = <var stack_0_12000 = (15: Int)<BR />goto 12000>, xlabel = 8000]
+	12000 [label = <return (stack_0_12000: Int)>, xlabel = 12000]
+	0 -> 4000
+	4000 [label = <var stack_0_12000 = (5: Int)<BR />goto 12000>, xlabel = 4000]
+	0 [label = <var var_2 = (i: Int)<BR />switch((var_2: Int)) {<BR />case 0: goto 4000<BR />case 1: goto 6000<BR />case 2: goto 10000<BR />case 3: goto 8000<BR />default: goto 10000<BR />}>, xlabel = 0]
+	10000 -> 12000
+	6000 -> 12000
+	10000 [label = <var stack_0_12000 = (0: Int)<BR />goto 12000>, xlabel = 10000]
+	8000 -> 12000
+	0 -> 10000
+	4000 -> 12000
+	0 -> 6000
+	0 -> 8000
+}
+
+digraph matchInt2 {
+	8000 -> 14000
+	8000 [label = <var stack_0_14000 = (15: Int)<BR />goto 14000>, xlabel = 8000]
+	6000 [label = <var stack_0_14000 = (10: Int)<BR />goto 14000>, xlabel = 6000]
+	0 [label = <var var_2 = (i: Int)<BR />switch((var_2: Int)) {<BR />case 0: goto 4000<BR />case 1: goto 6000<BR />case 3: goto 8000<BR />case 1000: goto 10000<BR />default: goto 12000<BR />}>, xlabel = 0]
+	0 -> 4000
+	4000 -> 14000
+	12000 [label = <var stack_0_14000 = (0: Int)<BR />goto 14000>, xlabel = 12000]
+	4000 [label = <var stack_0_14000 = (5: Int)<BR />goto 14000>, xlabel = 4000]
+	10000 [label = <var stack_0_14000 = (20: Int)<BR />goto 14000>, xlabel = 10000]
+	0 -> 12000
+	14000 [label = <return (stack_0_14000: Int)>, xlabel = 14000]
+	0 -> 10000
+	0 -> 6000
+	12000 -> 14000
+	10000 -> 14000
+	0 -> 8000
+	6000 -> 14000
+}
+
+digraph matchOption {
+	29000 [label = <return (var_2: Int)>, xlabel = 29000]
+	24000 [label = <scala/MatchError.&lt;clinit&gt;<BR />var local_3 = new scala/MatchError((var_3: AnyRef))<BR />var stack_0_29000 = (local_3: scala/MatchError)>, xlabel = 24000]
+	16000 -> 23000
+	16000 -> 20000
+	15000 -> 16000
+	24000 -> 29000
+	23000 [label = <goto 24000>, xlabel = 23000]
+	15000 [label = <goto 16000>, xlabel = 15000]
+	0 -> 15000
+	20000 -> 29000
+	5000 -> 29000
+	5000 [label = <var var_4 = (var_3: AnyRef).asInstanceOf[scala/Some]<BR />notNull((var_4: AnyRef))<BR />var local_0 = (var_4: AnyRef).value()<BR />var local_1 = scala/runtime/BoxesRunTime.unboxToInt((local_0: Unknown))<BR />var var_5 = (local_1: Unknown)<BR />var var_2 = (var_5: Int)<BR />goto 29000>, xlabel = 5000]
+	0 -> 5000
+	0 [label = <var var_3 = (i: AnyRef)<BR />if(((var_3: AnyRef).isInstanceOf[Int] == (0: Int))) goto 15000>, xlabel = 0]
+	16000 [label = <scala/None$.&lt;clinit&gt;<BR />notNull((scala/None$.MODULE$: scala/None$))<BR />var local_2 = (scala/None$.MODULE$: scala/None$).equals((var_3: AnyRef))<BR />if(((local_2: Unknown) == (0: Int))) goto 23000>, xlabel = 16000]
+	23000 -> 24000
+	20000 [label = <var var_2 = (0: Int)<BR />goto 29000>, xlabel = 20000]
 }

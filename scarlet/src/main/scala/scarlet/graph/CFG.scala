@@ -35,19 +35,20 @@ object CFG {
       case Seq((_, Return(_)), (l2, _)) => Seq(l2)
       //TODO: All the instructions that can throw. Also all method calls
       case _ => Nil
-    }
+    }.toSeq
 
     val leaders = (code.head._1 +: gotoLeaders.toVector).distinct.sorted
     val basicBlocks = (
       leaders.sliding(2) ++ (if (leaders.length > 1) Vector(Vector(leaders.last)) else Nil)
     )
       .map {
-        case Seq(current, next) => code.view.filterKeys(k => k >= current && k < next)
-        case Seq(current)       => code.view.filterKeys(k => k >= current) //Last leader
+        case Seq(current, next) => current -> code.view.filterKeys(k => k >= current && k < next)
+        case Seq(current)       => current -> code.view.filterKeys(k => k >= current) //Last leader
       }
-      .map(map => CodeBasicBlock(TreeMap(map.toSeq: _*)))
+      .map(t => t._1 -> TreeMap(t._2.toSeq: _*))
       .toVector
-      .sortBy(_.code.head._1)
+      .sortBy(_._1)
+      .map(t => CodeBasicBlock(t._2))
 
     def isUnconditionalBranch(code: SIR) = code match {
       case _: Goto => true

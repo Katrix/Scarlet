@@ -17,7 +17,6 @@ The complete list is.
 * `classfile`: Reads the classfile, resolves some references, but nothing more.
 * `raw-bytecode`: Parses the bytecode of the methods, but does not resolve references to the constant pool, or do any other processing.
 * `bytecode`: Reads the bytecode of the methods, resolves references to the constant pool, and removes specialization.
-* `bytecode-syntax`: TODO
 * `sir`: Scarlet's first IR. A stackless IR, close to but not exactly the same as bytecode. Based on the IR from this [paper](http://people.irisa.fr/David.Pichardie/papers/aplas10.pdf)
 * `sir-syntax`: Same as `sir`, but prints it in a more readable format, looking more like normal code.
 * `sir-cfg`: DOT file with SIR organized by control flow graph.
