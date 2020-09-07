@@ -71,12 +71,14 @@ object Code extends NamedAttributeCompanion[Code] {
             }
 
             val addrSubst = LongMap(v.keys.zipWithIndex.map(t => t._1 -> t._2.toLong).toSeq: _*)
+            def getNewAddress(address: Long): Long =
+              addrSubst(address.toShort)
 
             val validatedDenormalized =
               validatedDenormalizedVec.bimap(
                 { xs =>
                   val substitutedKeys = xs.map {
-                    case (k, es) => addrSubst(k) -> es
+                    case (k, es) => getNewAddress(k) -> es
                   }
 
                   LongMap(substitutedKeys.toList: _*)
@@ -87,16 +89,16 @@ object Code extends NamedAttributeCompanion[Code] {
                       case (k, op) =>
                         import DeOPCode._
                         val substitutedOp = op match {
-                          case IntIfZero(cond, branchAddress) => IntIfZero(cond, addrSubst(branchAddress))
-                          case IntIfCmp(cond, branchAddress)  => IntIfCmp(cond, addrSubst(branchAddress))
-                          case RefIf(cond, branchAddress)     => RefIf(cond, addrSubst(branchAddress))
-                          case RefIfCmp(cond, branchAddress)  => RefIfCmp(cond, addrSubst(branchAddress))
-                          case Goto(branchAddress)            => Goto(addrSubst(branchAddress))
+                          case IntIfZero(cond, branchAddress) => IntIfZero(cond, getNewAddress(branchAddress))
+                          case IntIfCmp(cond, branchAddress)  => IntIfCmp(cond, getNewAddress(branchAddress))
+                          case RefIf(cond, branchAddress)     => RefIf(cond, getNewAddress(branchAddress))
+                          case RefIfCmp(cond, branchAddress)  => RefIfCmp(cond, getNewAddress(branchAddress))
+                          case Goto(branchAddress)            => Goto(getNewAddress(branchAddress))
                           case Switch(defaultAddress, pairs) =>
-                            Switch(defaultAddress, pairs.map(t => t._1 -> addrSubst(t._2)))
+                            Switch(defaultAddress, pairs.map(t => t._1 -> getNewAddress(t._2)))
                           case _ => op
                         }
-                        addrSubst(k) -> substitutedOp
+                        getNewAddress(k) -> substitutedOp
                     }
 
                     LongMap(substitutedKeys: _*)
