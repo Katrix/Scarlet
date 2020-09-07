@@ -280,8 +280,8 @@ object OPCodeToSIR {
       case OPCode.GetStatic(fieldRefInfo) =>
         seqSimple((SIR.MaybeInit(fieldRefInfo.clazz), Expr.GetStatic(fieldRefInfo) :: stack))
       case OPCode.PutStatic(fieldRefInfo) =>
-        stack1(IRType.Any)(
-          (e, r) => (Seq(SIR.MaybeInit(fieldRefInfo.clazz), SIR.SetStatic(fieldRefInfo, e)), r, tempVarCount)
+        stack1(IRType.Any)((e, r) =>
+          (Seq(SIR.MaybeInit(fieldRefInfo.clazz), SIR.SetStatic(fieldRefInfo, e)), r, tempVarCount)
         )
       case OPCode.GetField(fieldRefInfo) =>
         seq(stack1(IRType.AnyRef)((e, r) => (SIR.NotNull(e), Expr.GetField(e, fieldRefInfo) :: r)))
@@ -395,8 +395,8 @@ object OPCodeToSIR {
             val dimTests = Seq(SIR.NotNegative(dimExpr), SIR.NotZero(dimExpr)) ++ sizesExpr.map(s => SIR.NotNegative(s))
 
             val tpe = (0 until dimensions)
-              .foldLeft(IRType.Ref(classInfo): IRType)(
-                (tpe, _) => IRType.Array(tpe.asInstanceOf[IRType.Aux[_]]): IRType
+              .foldLeft(IRType.Ref(classInfo): IRType)((tpe, _) =>
+                IRType.Array(tpe.asInstanceOf[IRType.Aux[_]]): IRType
               )
               .asInstanceOf[IRType.Aux[Array[_]]]
 

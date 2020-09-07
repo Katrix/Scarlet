@@ -21,7 +21,8 @@ object RuntimeInvisibleAnnotations extends NamedAttributeCompanion[RuntimeInvisi
   override def name: String = "RuntimeInvisibleAnnotations"
 }
 
-case class RuntimeInvisibleParameterAnnotations(parameterAnnotations: Vector[Vector[Annotation]]) extends NamedAttribute {
+case class RuntimeInvisibleParameterAnnotations(parameterAnnotations: Vector[Vector[Annotation]])
+    extends NamedAttribute {
   override type Self = RuntimeInvisibleParameterAnnotations
   override def companion: NamedAttributeCompanion[Self] = RuntimeInvisibleParameterAnnotations
 }

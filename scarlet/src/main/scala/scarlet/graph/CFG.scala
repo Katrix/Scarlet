@@ -114,8 +114,7 @@ object CFG {
   }
 
   def structureAcyclic[N, E[+X] <: EdgeLikeIn[X]](graph: Graph[N, E]) = {
-    graph.topologicalSort.map { order =>
-      }
+    graph.topologicalSort.map { order => }
 
     ???
   }

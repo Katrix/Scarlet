@@ -207,7 +207,8 @@ object Signature extends NamedAttributeCompanion[Signature] {
   private def superinterfaceSignature[_: P]: P[ClassTypeSignature] = P(classTypeSignature)
 
   private def methodSignature[_: P]: P[MethodSignature] =
-    P((typeParameters.? ~ "(" ~ javaTypeSignature.rep ~ ")" ~ result ~ throwsSignature.rep) ~ End).map(MethodSignature.tupled)
+    P((typeParameters.? ~ "(" ~ javaTypeSignature.rep ~ ")" ~ result ~ throwsSignature.rep) ~ End)
+      .map(MethodSignature.tupled)
 
   private def result[_: P]: P[Result] = P(javaTypeSignature | P("V").map(_ => Result.Void))
 
@@ -221,7 +222,7 @@ object Signature extends NamedAttributeCompanion[Signature] {
 
   private def parseAttempt[A](string: String, parser: P[_] => P[A]) = parse(string, parser) match {
     case Parsed.Success(value, _) => Attempt.successful(value)
-    case failure: Parsed.Failure      => Attempt.failure(Err(failure.trace().msg))
+    case failure: Parsed.Failure  => Attempt.failure(Err(failure.trace().msg))
   }
 
   override def codec(

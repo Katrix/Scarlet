@@ -20,7 +20,9 @@ object AnnotationsCodecs {
     (constPool.constantUtf8Codec :: elementValueCodec(constPool)).as[ElementValuePair]
 
   def elementValueCodec(constPool: ConstantPool): Codec[ElementValue] = {
-    def constantCodecPartial[P <: PoolValueConstant[PV]: Typeable, PV, EV, E <: ElementValue.ConstElementValue[EV]: Typeable](
+    def constantCodecPartial[P <: PoolValueConstant[PV]: Typeable, PV, EV, E <: ElementValue.ConstElementValue[
+      EV
+    ]: Typeable](
         from: PV => EV,
         to: EV => PV
     )(
@@ -66,8 +68,9 @@ object AnnotationsCodecs {
 
   def targetTypeCodec(constPool: ConstantPool): Codec[TargetType] = {
     import TargetType.{TargetInfo => Targets}
-    val typeParameterTargetCodec      = uint8.as[Targets.TypeParameterTarget]
-    val supertypeTargetCodec          = uint16.as[Targets.SupertypeTarget] //TODO: Need access to interfaces in ClassFile to resolve this
+    val typeParameterTargetCodec = uint8.as[Targets.TypeParameterTarget]
+    val supertypeTargetCodec =
+      uint16.as[Targets.SupertypeTarget] //TODO: Need access to interfaces in ClassFile to resolve this
     val typeParameterBoundTargetCodec = (uint8 :: uint8).as[Targets.TypeParameterBoundTarget]
     val formalParameterTargetCodec    = uint8.as[Targets.FormalParameterTarget]
     val throwsTargetCodec             = uint16.as[Targets.ThrowsTarget] //TODO: Need access to Exceptions attribute

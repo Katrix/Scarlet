@@ -11,7 +11,7 @@ lazy val scarlet = project.settings(
   libraryDependencies += "org.apache.commons" % "commons-text" % "1.9",
   libraryDependencies ++= Seq(
     "org.scalameta" %% "scalameta"        % "4.3.21",
-    "org.scalameta"  %% "scalafmt-dynamic" % "2.6.4"
+    "org.scalameta" %% "scalafmt-dynamic" % "2.6.4"
   ),
   libraryDependencies += "org.typelevel"    %% "cats-core"  % "2.2.0",
   libraryDependencies += "com.chuusai"      %% "shapeless"  % "2.3.3",

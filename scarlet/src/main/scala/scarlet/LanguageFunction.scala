@@ -28,11 +28,12 @@ trait LanguageFunction[I, O] { self =>
     override def print(out: O2): fansi.Str = next.print(out)
   }
 
-  def andThenMapping[I2, O2](f: O => I2)(next: LanguageFunction[I2, O2]): LanguageFunction[I, O2] = new LanguageFunction[I, O2] {
-    override def process(in: I): EitherNel[String, O2] = self.process(in).map(f).flatMap(next.process)
+  def andThenMapping[I2, O2](f: O => I2)(next: LanguageFunction[I2, O2]): LanguageFunction[I, O2] =
+    new LanguageFunction[I, O2] {
+      override def process(in: I): EitherNel[String, O2] = self.process(in).map(f).flatMap(next.process)
 
-    override def print(out: O2): fansi.Str = next.print(out)
-  }
+      override def print(out: O2): fansi.Str = next.print(out)
+    }
 }
 object LanguageFunction {
 
@@ -72,7 +73,10 @@ object LanguageFunction {
   }
 
   object DenormalizedBytecode
-      extends LanguageFunction[DenormClassfile, ClassfileWithData[Unit, Unit, LongMap[NEL[String]], LongMap[DeOPCode]]] {
+      extends LanguageFunction[
+        DenormClassfile,
+        ClassfileWithData[Unit, Unit, LongMap[NEL[String]], LongMap[DeOPCode]]
+      ] {
     override def process(
         in: DenormClassfile
     ): EitherNel[String, ClassfileWithData[Unit, Unit, LongMap[NEL[String]], LongMap[DeOPCode]]] = {
@@ -188,12 +192,12 @@ object LanguageFunction {
                 Seq(s"var local_$varIndex = ${clazz.name}.$name(${variables.map(_.toSyntax).mkString(", ")})")
               case ir.SIR.Call(varIndex, _, _, name, _, Some(obj), variables) =>
                 Seq(s"var local_$varIndex = ${obj.toSyntax}.$name(${variables.map(_.toSyntax).mkString(", ")})")
-              case ir.SIR.NewArray(varIndex, size, arrTpe) => Seq(s"var local_$varIndex = new ${arrTpe.describe}[${size.toSyntax}]")
+              case ir.SIR.NewArray(varIndex, size, arrTpe) =>
+                Seq(s"var local_$varIndex = new ${arrTpe.describe}[${size.toSyntax}]")
               case ir.SIR.NewMultiArray(varIndex, tpe, sizesExpr) =>
-
                 def underlyingTpe(tpe: ir.SIR.Type.Aux[_]): ir.SIR.Type = tpe match {
                   case ir.SIR.Type.Array(inner) => underlyingTpe(inner)
-                  case _ => tpe
+                  case _                        => tpe
                 }
 
                 val dimensionsBrackets = sizesExpr.map(e => s"[${e.toSyntax}]").mkString
@@ -221,9 +225,7 @@ object LanguageFunction {
 
     override def print(out: ClassfileWithData[Unit, Unit, NEL[String], LongMap[Vector[String]]]): fansi.Str = {
       Scarlet.printer(
-        out.rightmapMethod { code =>
-          code.values.flatten.mkString("\n")
-        }
+        out.rightmapMethod(code => code.values.flatten.mkString("\n"))
       )
     }
   }

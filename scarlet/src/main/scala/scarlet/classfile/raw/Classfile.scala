@@ -24,7 +24,6 @@ case class Classfile(
 ) {
   import denormalized.{ConstantPoolEntry => DeNormConstPoolEntry}
 
-
   /**
     * Denormalize a field of this classfile.
     */

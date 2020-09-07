@@ -8,7 +8,7 @@ import scodec.codecs._
 import shapeless._
 import shapeless.ops.hlist._
 
-import scala.annotation.unused
+import scala.annotation.{nowarn, unused}
 
 /**
   * Contains codecs for a single opcode, and a sequence of them
@@ -29,13 +29,11 @@ object OPCodeCodec {
     def mk[Repr1[_] <: HList, ArgCount <: Nat](
         implicit gen: Generic1.Aux[A, Trivial, Repr1],
         @unused argCount: Length.Aux[Repr1[Unit], ArgCount],
-        fillUnits: Fill.Aux[ArgCount, Unit, Repr1[Unit]],
         fillCodecs: Fill.Aux[ArgCount, Codec[Int], Repr1[Codec[Int]]],
         toHlistCoded: ToHListCodec.Aux[Repr1[Codec[Int]], Repr1[Int]]
     ): OPCodeEntry[A[Int]] = {
-      val units  = fillUnits(())
-      val codeId = gen.from(units).id
       val codecs = fillCodecs(uint8)
+      val codeId = gen.from(codecs).id
 
       val codeCodec = toHlistCoded(codecs).xmap[A[Int]](gen.from, gen.to)
       val unapply: OPCode => Option[A[Int]] = code => {
@@ -67,20 +65,19 @@ object OPCodeCodec {
       uint8 ~ uint8 ~ uint8 ~ uint8 ~
       uint8 ~ uint8 ~ uint8 ~ uint8
   ).flatZip {
-      case _ ~ _ ~ _ ~ _ ~ low1 ~ low2 ~ low3 ~ low4 ~ hi1 ~ hi2 ~ hi3 ~ hi4 =>
-        val low  = (low1 << 24) | (low2 << 16) | (low3 << 8) | low4
-        val high = (hi1 << 24) | (hi2 << 16) | (hi3 << 8) | hi4
-        val num  = high - low + 1
+    case _ ~ _ ~ _ ~ _ ~ low1 ~ low2 ~ low3 ~ low4 ~ hi1 ~ hi2 ~ hi3 ~ hi4 =>
+      val low  = (low1 << 24) | (low2 << 16) | (low3 << 8) | low4
+      val high = (hi1 << 24) | (hi2 << 16) | (hi3 << 8) | hi4
+      val num  = high - low + 1
 
-        vectorOfN(provide(num * 4), uint8)
-    }
-    .xmapc[TABLESWITCH[Int]] {
-      case def1 ~ def2 ~ def3 ~ def4 ~ low1 ~ low2 ~ low3 ~ low4 ~ hi1 ~ hi2 ~ hi3 ~ hi4 ~ offsets =>
-        TABLESWITCH(def1, def2, def3, def4, low1, low2, low3, low4, hi1, hi2, hi3, hi4, offsets)
-    } {
-      case TABLESWITCH(def1, def2, def3, def4, low1, low2, low3, low4, hi1, hi2, hi3, hi4, offsets) =>
-        def1 ~ def2 ~ def3 ~ def4 ~ low1 ~ low2 ~ low3 ~ low4 ~ hi1 ~ hi2 ~ hi3 ~ hi4 ~ offsets
-    }
+      vectorOfN(provide(num * 4), uint8)
+  }.xmapc[TABLESWITCH[Int]] {
+    case def1 ~ def2 ~ def3 ~ def4 ~ low1 ~ low2 ~ low3 ~ low4 ~ hi1 ~ hi2 ~ hi3 ~ hi4 ~ offsets =>
+      TABLESWITCH(def1, def2, def3, def4, low1, low2, low3, low4, hi1, hi2, hi3, hi4, offsets)
+  } {
+    case TABLESWITCH(def1, def2, def3, def4, low1, low2, low3, low4, hi1, hi2, hi3, hi4, offsets) =>
+      def1 ~ def2 ~ def3 ~ def4 ~ low1 ~ low2 ~ low3 ~ low4 ~ hi1 ~ hi2 ~ hi3 ~ hi4 ~ offsets
+  }
 
   private val tableSwitchEntry: OPCodeEntry[TABLESWITCH[Int]] = {
     val unapply: PartialFunction[OPCode, TABLESWITCH[Int]] = { case op: TABLESWITCH[Int] => op }
@@ -96,18 +93,17 @@ object OPCodeCodec {
     uint8 ~ uint8 ~ uint8 ~ uint8 ~
       uint8 ~ uint8 ~ uint8 ~ uint8
   ).flatZip {
-      case _ ~ _ ~ _ ~ _ ~ npairs1 ~ npairs2 ~ npairs3 ~ npairs4 =>
-        val npairs = (npairs1 << 24) | (npairs2 << 16) | (npairs3 << 8) | npairs4
+    case _ ~ _ ~ _ ~ _ ~ npairs1 ~ npairs2 ~ npairs3 ~ npairs4 =>
+      val npairs = (npairs1 << 24) | (npairs2 << 16) | (npairs3 << 8) | npairs4
 
-        vectorOfN(provide(npairs * 2 * 4), uint8)
-    }
-    .xmapc {
-      case def1 ~ def2 ~ def3 ~ def4 ~ npairs1 ~ npairs2 ~ npairs3 ~ npairs4 ~ pairs =>
-        LOOKUPSWITCH(def1, def2, def3, def4, npairs1, npairs2, npairs3, npairs4, pairs)
-    } {
-      case LOOKUPSWITCH(def1, def2, def3, def4, npairs1, npairs2, npairs3, npairs4, pairs) =>
-        def1 ~ def2 ~ def3 ~ def4 ~ npairs1 ~ npairs2 ~ npairs3 ~ npairs4 ~ pairs
-    }
+      vectorOfN(provide(npairs * 2 * 4), uint8)
+  }.xmapc {
+    case def1 ~ def2 ~ def3 ~ def4 ~ npairs1 ~ npairs2 ~ npairs3 ~ npairs4 ~ pairs =>
+      LOOKUPSWITCH(def1, def2, def3, def4, npairs1, npairs2, npairs3, npairs4, pairs)
+  } {
+    case LOOKUPSWITCH(def1, def2, def3, def4, npairs1, npairs2, npairs3, npairs4, pairs) =>
+      def1 ~ def2 ~ def3 ~ def4 ~ npairs1 ~ npairs2 ~ npairs3 ~ npairs4 ~ pairs
+  }
 
   private val lookupSwitchEntry: OPCodeEntry[LOOKUPSWITCH[Int]] = {
     val unapply: PartialFunction[OPCode, LOOKUPSWITCH[Int]] = { case op: LOOKUPSWITCH[Int] => op }
@@ -162,6 +158,7 @@ object OPCodeCodec {
     * A codec for a single opcode.
     */
   val codec: Codec[OPCode] = {
+    @nowarn
     val opcodes: Seq[OPCodeEntry[_ <: OPCode]] = Seq(
       p0(NOP),
       p0(ACONST_NULL),
@@ -367,7 +364,7 @@ object OPCodeCodec {
       pN[JSR_W].mk,
       p0(BREAKPOINT),
       p0(IMPDEP1),
-      p0(IMPDEP2),
+      p0(IMPDEP2)
     )
 
     opcodes.foldLeft(discriminated[OPCode].by(uint8)) {
@@ -398,7 +395,7 @@ object OPCodeCodec {
             codec.encode(a) match {
               case Attempt.Successful(aa) =>
                 if (aa.startsWith(tableSwitchIdVec) || aa.startsWith(lookupSwitchIdVec)) {
-                  val modWritten = writtenBytes % 4
+                  val modWritten = writtenBytes     % 4
                   val padding    = (4 - modWritten) % 4
                   val toWrite    = aa.padLeft(padding * 8)
                   writtenBytes += toWrite.length
@@ -407,7 +404,9 @@ object OPCodeCodec {
                   writtenBytes += aa.length
                   buf += aa
                 }
-              case Attempt.Failure(err) => return Attempt.failure(err.pushContext(buf.size.toString))
+              case Attempt.Failure(err) => {
+                  return Attempt.failure(err.pushContext(buf.size.toString))
+                }: @nowarn
             }
         }
 

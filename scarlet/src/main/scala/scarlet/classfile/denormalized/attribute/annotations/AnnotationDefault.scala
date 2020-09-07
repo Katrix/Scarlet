@@ -1,11 +1,6 @@
 package scarlet.classfile.denormalized.attribute.annotations
 import scarlet.classfile.denormalized.{AttributeOwner, ConstantPool}
-import scarlet.classfile.denormalized.attribute.{
-  Attribute,
-  AttributeCompanion,
-  NamedAttribute,
-  NamedAttributeCompanion
-}
+import scarlet.classfile.denormalized.attribute.{Attribute, AttributeCompanion, NamedAttribute, NamedAttributeCompanion}
 import scodec.Codec
 
 case class AnnotationDefault(defaultValue: ElementValue) extends NamedAttribute {

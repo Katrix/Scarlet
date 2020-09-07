@@ -10,7 +10,7 @@ import scalax.collection.GraphPredef._
 
 /**
   * A CFG that flows from opcode to opcode. To be used to convert opcodes to [[scarlet.ir.SIR]].
- *
+  *
   * @param cfg The graph for all the program counters for the code.
   * @param jumpTargets All the jump targets of this graph.
   */

@@ -40,11 +40,10 @@ object Code extends NamedAttributeCompanion[Code] {
     val exception = (uint16 :: uint16 :: uint16 :: uint16).as[ExceptionHandler]
     val attributesCodec =
       raw.ClassfileCodec.attributes.narrow[Vector[Unknown]](
-        rawAttr => {
+        rawAttr =>
           Attempt.fromEither(
             rawAttr.denormalize(constPool).leftMap(es => MultiErr(es, Nil)).toEither
-          )
-        },
+          ),
         attrib =>
           raw.Attributes(attrib.map(attr => raw.AttributeInfo(constPool.indexOf(Utf8Info(attr.name)), attr.data)))
       )
@@ -81,17 +80,18 @@ object Code extends NamedAttributeCompanion[Code] {
                   }
 
                   LongMap(substitutedKeys.toList: _*)
-                }, {
+                },
+                {
                   v =>
                     val substitutedKeys = v.map {
                       case (k, op) =>
                         import DeOPCode._
                         val substitutedOp = op match {
-                          case IntIfZero(cond, branchAddress)    => IntIfZero(cond, addrSubst(branchAddress))
-                          case IntIfCmp(cond, branchAddress) => IntIfCmp(cond, addrSubst(branchAddress))
-                          case RefIf(cond, branchAddress)    => RefIf(cond, addrSubst(branchAddress))
-                          case RefIfCmp(cond, branchAddress) => RefIfCmp(cond, addrSubst(branchAddress))
-                          case Goto(branchAddress)           => Goto(addrSubst(branchAddress))
+                          case IntIfZero(cond, branchAddress) => IntIfZero(cond, addrSubst(branchAddress))
+                          case IntIfCmp(cond, branchAddress)  => IntIfCmp(cond, addrSubst(branchAddress))
+                          case RefIf(cond, branchAddress)     => RefIf(cond, addrSubst(branchAddress))
+                          case RefIfCmp(cond, branchAddress)  => RefIfCmp(cond, addrSubst(branchAddress))
+                          case Goto(branchAddress)            => Goto(addrSubst(branchAddress))
                           case Switch(defaultAddress, pairs) =>
                             Switch(defaultAddress, pairs.map(t => t._1 -> addrSubst(t._2)))
                           case _ => op

@@ -21,6 +21,7 @@ sealed abstract class ConstantPoolTag(val value: Int, val size: Int, private val
 object ConstantPoolTag {
   import ConstantPoolEntry._
 
+  //https://docs.oracle.com/javase/specs/jvms/se8/html/jvms-4.html#jvms-4.4-140
   case object Class              extends ConstantPoolTag(7, 1, uint16.as[ClassInfo].upcast)
   case object FieldRef           extends ConstantPoolTag(9, 1, (uint16 :: uint16).as[FieldRefInfo].upcast)
   case object MethodRef          extends ConstantPoolTag(10, 1, (uint16 :: uint16).as[MethodRefInfo].upcast)

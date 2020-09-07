@@ -3,12 +3,7 @@ package scarlet.classfile.raw.opcodes
 import cats.data.Validated.Valid
 import cats.data.ValidatedNel
 import cats.syntax.all._
-import scarlet.classfile.denormalized.ConstantPoolEntry.{
-  ClassInfo,
-  FieldRefInfo,
-  InterfaceMethodRefInfo,
-  MethodRefInfo
-}
+import scarlet.classfile.denormalized.ConstantPoolEntry.{ClassInfo, FieldRefInfo, InterfaceMethodRefInfo, MethodRefInfo}
 import scarlet.classfile.denormalized.opcodes.{OPCode => DeOP}
 import scarlet.classfile.denormalized.opcodes.OPCode.{MethodInfo, Type => DeOPType}
 import scarlet.classfile.denormalized.{ConstantPool, ConstantPoolEntry}
@@ -267,15 +262,15 @@ object OPCodeDenormalizer {
       case RET(_)                         => Err("Unsupported OPCODE RET").invalidNel
 
       case LOOKUPSWITCH(
-          defaultbyte1,
-          defaultbyte2,
-          defaultbyte3,
-          defaultbyte4,
-          _,
-          _,
-          _,
-          _,
-          pairs
+            defaultbyte1,
+            defaultbyte2,
+            defaultbyte3,
+            defaultbyte4,
+            _,
+            _,
+            _,
+            _,
+            pairs
           ) =>
         val default = ((defaultbyte1 << 24) | (defaultbyte2 << 16) | (defaultbyte3 << 8) | defaultbyte4) + opcodeAddress
 
@@ -287,19 +282,19 @@ object OPCodeDenormalizer {
 
         Valid(DeOP.Switch(default, intPairs.toVector))
       case TABLESWITCH(
-          defaultbyte1,
-          defaultbyte2,
-          defaultbyte3,
-          defaultbyte4,
-          lowbyte1,
-          lowbyte2,
-          lowbyte3,
-          lowbyte4,
-          _,
-          _,
-          _,
-          _,
-          offsets
+            defaultbyte1,
+            defaultbyte2,
+            defaultbyte3,
+            defaultbyte4,
+            lowbyte1,
+            lowbyte2,
+            lowbyte3,
+            lowbyte4,
+            _,
+            _,
+            _,
+            _,
+            offsets
           ) =>
         val default = ((defaultbyte1 << 24) | (defaultbyte2 << 16) | (defaultbyte3 << 8) | defaultbyte4) + opcodeAddress
         val low     = (lowbyte1 << 24) | (lowbyte2 << 16) | (lowbyte3 << 8) | lowbyte4

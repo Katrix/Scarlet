@@ -53,6 +53,8 @@ It should be able to do this both with and without the information provided by e
 Nowhere really, but if you really want an explanation, let's go with SCAla Reverse Language Engineering Tool.
 
 ## References
+https://docs.oracle.com/javase/specs/jvms/se8/html/jvms-2.html
+https://docs.oracle.com/javase/specs/jvms/se8/html/jvms-4.html
 https://docs.oracle.com/javase/specs/jvms/se8/html/jvms-6.html
 https://www.ndss-symposium.org/ndss2015/ndss-2015-programme/no-more-gotos-decompilation-using-pattern-independent-control-flow-structuring-and-semantics/
 https://www.backerstreet.com/decompiler/frameless_functions.php

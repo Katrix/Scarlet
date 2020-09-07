@@ -33,9 +33,9 @@ object ScarletLanguage extends StringEnum[ScarletLanguage[_]] {
   }
   //Raw bytecode throws away the denormalized bytecode, so we go one more step back
   case object Bytecode
-    extends ScarletLanguage[ClassfileWithData[Unit, Unit, LongMap[NEL[String]], LongMap[DeOPCode]]]("bytecode") {
+      extends ScarletLanguage[ClassfileWithData[Unit, Unit, LongMap[NEL[String]], LongMap[DeOPCode]]]("bytecode") {
     override def langFunction
-    : LanguageFunction[InputStream, ClassfileWithData[Unit, Unit, LongMap[NEL[String]], LongMap[DeOPCode]]] =
+        : LanguageFunction[InputStream, ClassfileWithData[Unit, Unit, LongMap[NEL[String]], LongMap[DeOPCode]]] =
       Classfile.langFunction.andThen(LanguageFunction.DenormalizedBytecode)
   }
   //case object BytecodeSyntax extends ScarletLanguage
