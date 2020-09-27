@@ -58,7 +58,7 @@ object Signature extends NamedAttributeCompanion[Signature] {
       classTypeSignatureSuffix: Seq[ClassTypeSignatureSuffix]
   ) extends ReferenceTypeSignature {
     override def toStringSignature: String =
-      s"L${packageSpecifier.fold("")(_.toStringSignature)}${simpleClassTypeSignature.toStringSignature}${classTypeSignatureSuffix.map(_.toStringSignature).mkString}"
+      s"L${packageSpecifier.fold("")(_.toStringSignature)}${simpleClassTypeSignature.toStringSignature}${classTypeSignatureSuffix.map(_.toStringSignature).mkString};"
   }
   case class TypeVariableSignature(identifier: String) extends ReferenceTypeSignature {
     override def toStringSignature: String = s"T$identifier;"
@@ -67,8 +67,10 @@ object Signature extends NamedAttributeCompanion[Signature] {
     override def toStringSignature: String = s"[${javaTypeSignature.toStringSignature}"
   }
 
-  case class PackageSpecifier(head: String, tail: Seq[PackageSpecifier]) {
+  case class PackageSpecifier(head: String, tail: List[PackageSpecifier]) {
     def toStringSignature: String = s"$head/${tail.map(_.toStringSignature).mkString}"
+
+    def toList: List[String] = head :: tail.flatMap(_.toList)
   }
   case class SimpleClassTypeSignature(identifier: String, typeArguments: Option[TypeArguments]) {
     def toStringSignature: String = s"$identifier${typeArguments.fold("")(_.toStringSignature)}"
@@ -78,8 +80,10 @@ object Signature extends NamedAttributeCompanion[Signature] {
     def toStringSignature: String = s".${classTypeSignature.toStringSignature}"
   }
 
-  case class TypeArguments(head: TypeArgument, tail: Seq[TypeArgument]) {
+  case class TypeArguments(head: TypeArgument, tail: List[TypeArgument]) {
     def toStringSignature: String = s"<${head.toStringSignature}${tail.map(_.toStringSignature).mkString}>"
+
+    def toList: Seq[TypeArgument] = head :: tail
   }
   sealed trait TypeArgument {
     def toStringSignature: String
@@ -107,8 +111,10 @@ object Signature extends NamedAttributeCompanion[Signature] {
     }
   }
 
-  case class TypeParameters(head: TypeParameter, tail: Seq[TypeParameter]) {
+  case class TypeParameters(head: TypeParameter, tail: List[TypeParameter]) {
     def toStringSignature: String = s"<${head.toStringSignature}${tail.map(_.toStringSignature).mkString}>"
+
+    def toList: List[TypeParameter] = head :: tail
   }
   case class TypeParameter(
       identifier: String,
@@ -116,7 +122,7 @@ object Signature extends NamedAttributeCompanion[Signature] {
       interfaceBound: Seq[ReferenceTypeSignature]
   ) {
     def toStringSignature: String =
-      s"$identifier${classBound.fold("")(_.toStringSignature)}${interfaceBound.map(_.toStringSignature).mkString}"
+      s"$identifier${classBound.fold("")(":" + _.toStringSignature)}${interfaceBound.map(":" + _.toStringSignature).mkString}"
   }
 
   sealed trait Result {
@@ -140,6 +146,8 @@ object Signature extends NamedAttributeCompanion[Signature] {
     }
   }
 
+  //Is this a sloppy parser? Yes. It's also translated directly from the JVM specification.
+
   private def javaTypeSignature[_: P]: P[JavaTypeSignature] = P(referenceTypeSignature | baseType)
 
   private def baseType[_: P]: P[BaseType] =
@@ -162,13 +170,13 @@ object Signature extends NamedAttributeCompanion[Signature] {
       .map(ClassTypeSignature.tupled)
 
   private def packageSpecifier[_: P]: P[PackageSpecifier] =
-    P(identifier ~ "/" ~ packageSpecifier.rep).map(PackageSpecifier.tupled)
+    P(identifier ~ "/" ~ packageSpecifier.rep.map(_.toList)).map(PackageSpecifier.tupled)
 
   private def simpleClassTypeSignature[_: P]: P[SimpleClassTypeSignature] =
     P(identifier ~ typeArguments.?).map(SimpleClassTypeSignature.tupled)
 
   private def typeArguments[_: P]: P[TypeArguments] =
-    P("<" ~ typeArgument ~ typeArgument.rep ~ ">").map(TypeArguments.tupled)
+    P("<" ~ typeArgument ~ typeArgument.rep.map(_.toList) ~ ">").map(TypeArguments.tupled)
 
   private def typeArgument[_: P]: P[TypeArgument] =
     P(
@@ -193,7 +201,7 @@ object Signature extends NamedAttributeCompanion[Signature] {
     P((typeParameters.? ~ superclassSignature ~ superinterfaceSignature.rep) ~ End).map(ClassSignature.tupled)
 
   private def typeParameters[_: P]: P[TypeParameters] =
-    P("<" ~ typeParameter ~ typeParameter.rep ~ ">").map(TypeParameters.tupled)
+    P("<" ~ typeParameter ~ typeParameter.rep.map(_.toList) ~ ">").map(TypeParameters.tupled)
 
   private def typeParameter[_: P]: P[TypeParameter] =
     P(identifier ~ classBound ~ interfaceBound.rep).map(TypeParameter.tupled)

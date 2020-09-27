@@ -6,7 +6,7 @@ case class Annotation(fieldType: Descriptor.FieldType, elementValuePairs: Vector
 case class ElementValuePair(elementName: String, value: ElementValue)
 sealed abstract class ElementValue(val tag: Char)
 object ElementValue {
-  trait ConstElementValue[A] extends ElementValue {
+  sealed trait ConstElementValue[A] extends ElementValue {
     def const: A
   }
 

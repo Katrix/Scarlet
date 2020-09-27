@@ -53,16 +53,24 @@ object ScarletLanguage extends StringEnum[ScarletLanguage[_]] {
     override def langFunction: LanguageFunction[InputStream, SIRSyntaxOutput] =
       SIR.langFunction.andThenMapping(_.leftmapMethod(_._1))(LanguageFunction.`SIR-Syntax`)
   }
+  type StringOutput = ClassfileWithData[Unit, Unit, NEL[String], String]
+  case object SIRClassSyntax extends ScarletLanguage[StringOutput]("sir-classsyntax") {
+    override def langFunction: LanguageFunction[InputStream, StringOutput] =
+      SIRSyntax.langFunction.andThen(LanguageFunction.`SIR-ClassSyntax`)
+  }
 
   type SIRCFGOutput = ClassfileWithData[Unit, Unit, NEL[String], graph.CFG[graph.CFG.CodeBasicBlock]]
   case object SIRCFG extends ScarletLanguage[SIRCFGOutput]("sir-cfg") {
     override def langFunction: LanguageFunction[InputStream, SIRCFGOutput] =
       SIR.langFunction.andThenMapping(_.leftmapMethod(_._1))(LanguageFunction.`SIR-CFG`)
   }
-  type SIRCFGSyntaxOutput = ClassfileWithData[Unit, Unit, NEL[String], String]
-  case object SIRCFGSyntax extends ScarletLanguage[SIRCFGSyntaxOutput]("sir-cfg-syntax") {
-    override def langFunction: LanguageFunction[InputStream, SIRCFGSyntaxOutput] =
+  case object SIRCFGSyntax extends ScarletLanguage[StringOutput]("sir-cfg-syntax") {
+    override def langFunction: LanguageFunction[InputStream, StringOutput] =
       SIRCFG.langFunction.andThen(LanguageFunction.`SIR-CFG-Syntax`)
+  }
+  case object SIRCFGClassSyntax extends ScarletLanguage[StringOutput]("sir-cfg-classsyntax") {
+    override def langFunction: LanguageFunction[InputStream, StringOutput] =
+      SIRCFGSyntax.langFunction.andThen(LanguageFunction.`SIR-CFG-ClassSyntax`)
   }
   //case object TIR            extends ScarletLanguage
   //case object TIRSyntax      extends ScarletLanguage

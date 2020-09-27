@@ -3,25 +3,24 @@ package scarlet
 import java.io.InputStream
 
 import cats.arrow.FunctionK
-
-import scala.collection.immutable.LongMap
 import cats.data.Validated.Valid
 import cats.data.{EitherNel, ValidatedNel, NonEmptyList => NEL}
 import cats.syntax.all._
 import fansi.Str
 import org.apache.commons.text.StringEscapeUtils
-import scarlet.classfile.denormalized.attribute.{Code, MethodParameters, NamedAttributeCompanion}
+import scalax.collection.GraphEdge._
+import scalax.collection._
+import scalax.collection.io.dot._
+import scarlet.classfile.denormalized.attribute._
 import scarlet.classfile.denormalized.opcodes.{OPCode => DeOPCode}
 import scarlet.classfile.denormalized.{Classfile => DenormClassfile}
 import scarlet.classfile.raw.{ClassfileCodec, Classfile => RawClassfile}
 import scarlet.graph.{CFG, OPCodeCFG}
 import scarlet.ir.OPCodeToSIR.{StackFrame, CodeWithStack => SIRCode}
-import scarlet.ir.{ClassfileWithData, FieldWithData, MethodWithData, OPCodeToSIR}
+import scarlet.ir.{ClassfileWithData, FieldWithData, MethodWithData, OPCodeToSIR, SimpleClassSyntax}
 import scodec.Err
 
-import scalax.collection._
-import scalax.collection.GraphEdge._
-import scalax.collection.io.dot._
+import scala.collection.immutable.LongMap
 
 trait LanguageFunction[I, O] { self =>
 
@@ -208,6 +207,27 @@ object LanguageFunction {
         )
     }
 
+  object `SIR-ClassSyntax`
+      extends LanguageFunction[ClassfileWithData[
+        Unit,
+        Unit,
+        NEL[String],
+        LongMap[Vector[String]]
+      ], ClassfileWithData[
+        Unit,
+        Unit,
+        NEL[String],
+        String
+      ]] {
+    override def process(
+        in: ClassfileWithData[Unit, Unit, NEL[String], LongMap[Vector[String]]]
+    ): EitherNel[String, ClassfileWithData[Unit, Unit, NEL[String], String]] =
+      Right(in.rightmapMethod(_.values.flatten.mkString("\n")))
+
+    override def print(out: ClassfileWithData[Unit, Unit, NEL[String], String]): Str =
+      SimpleClassSyntax.classObjToSyntax(out).syntax
+  }
+
   object `SIR-CFG`
       extends LanguageFunction[ClassfileWithData[Unit, Unit, NEL[String], SIRCode], ClassfileWithData[
         Unit,
@@ -320,5 +340,17 @@ object LanguageFunction {
 
     override def print(out: ClassfileWithData[Unit, Unit, NEL[String], String]): Str =
       Scarlet.printer(out)
+  }
+
+  object `SIR-CFG-ClassSyntax`
+      extends LanguageFunction[
+        ClassfileWithData[Unit, Unit, NEL[String], String],
+        ClassfileWithData[Unit, Unit, NEL[String], String]
+      ] {
+    override def process(
+        in: ClassfileWithData[Unit, Unit, NEL[String], String]
+    ): EitherNel[String, ClassfileWithData[Unit, Unit, NEL[String], String]] = Right(in)
+
+    override def print(out: ClassfileWithData[Unit, Unit, NEL[String], String]): Str = SimpleClassSyntax.classObjToSyntax(out).syntax
   }
 }
