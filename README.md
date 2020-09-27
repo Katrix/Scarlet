@@ -80,10 +80,10 @@ Nowhere really, but if you really want an explanation, let's go with
 SCAla Reverse Language Engineering Tool.
 
 ## References
-https://docs.oracle.com/javase/specs/jvms/se8/html/jvms-2.html
-https://docs.oracle.com/javase/specs/jvms/se8/html/jvms-4.html
-https://docs.oracle.com/javase/specs/jvms/se8/html/jvms-6.html
-https://www.ndss-symposium.org/ndss2015/ndss-2015-programme/no-more-gotos-decompilation-using-pattern-independent-control-flow-structuring-and-semantics/
-https://www.backerstreet.com/decompiler/frameless_functions.php
-https://www.researchgate.net/publication/2645337_Analyzing_Control_Flow_in_Java_Bytecode
-http://people.irisa.fr/David.Pichardie/papers/aplas10.pdf
+https://docs.oracle.com/javase/specs/jvms/se8/html/jvms-2.html  
+https://docs.oracle.com/javase/specs/jvms/se8/html/jvms-4.html  
+https://docs.oracle.com/javase/specs/jvms/se8/html/jvms-6.html  
+https://www.ndss-symposium.org/ndss2015/ndss-2015-programme/no-more-gotos-decompilation-using-pattern-independent-control-flow-structuring-and-semantics/  
+https://www.backerstreet.com/decompiler/frameless_functions.php  
+https://www.researchgate.net/publication/2645337_Analyzing_Control_Flow_in_Java_Bytecode  
+http://people.irisa.fr/David.Pichardie/papers/aplas10.pdf  
