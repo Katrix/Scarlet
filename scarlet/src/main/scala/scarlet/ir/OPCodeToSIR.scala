@@ -1,12 +1,10 @@
 package scarlet.ir
 
-import cats.arrow.FunctionK
-import scarlet.classfile.denormalized.ConstantPoolEntry.FieldRefInfo
 import scarlet.classfile.denormalized.Descriptor
 import scarlet.classfile.denormalized.opcodes.OPCode
 import scarlet.classfile.denormalized.opcodes.OPCode.{MethodInfo, Type => OPType}
 import scarlet.graph.OPCodeCFG
-import scarlet.ir.SIR.{Expr, Type => IRType}
+import scarlet.ir.SIR.{Expr, TempVar, Type => IRType}
 
 import scala.collection.immutable.LongMap
 import scala.language.implicitConversions
@@ -22,8 +20,8 @@ object OPCodeToSIR {
   type CodeWithStack = LongMap[StackFrame]
 
   case class StackFrame(before: Stack, op: OPCode, code: Vector[SIR], after: Stack)
-  case class StackStep(stack: Stack, irMap: CodeWithStack, tempVarCount: Int)
-  case class Conversion(code: Seq[SIR], stack: Stack, tempVarCount: Int)
+  case class StackStep(stack: Stack, irMap: CodeWithStack, tempVar: TempVar)
+  case class Conversion(code: Seq[SIR], stack: Stack, tempVar: TempVar)
   case class SemanticSave(saveIr: Seq[SIR], newTempVarCount: Int, saveSubstitutedStack: Stack)
 
   def convert(
@@ -52,9 +50,9 @@ object OPCodeToSIR {
 
     code.toVector
       .foldLeft(
-        StackStep(List.empty[Expr[_]], LongMap.empty[StackFrame], 0).asRight[(String, CodeWithStack)]
+        StackStep(List.empty[Expr[_]], LongMap.empty[StackFrame], new TempVar(0)).asRight[(String, CodeWithStack)]
       ) {
-        case (Right(StackStep(inStack, irMap, tempVarCount)), (pc, opcode)) =>
+        case (Right(StackStep(inStack, irMap, tempVar)), (pc, opcode)) =>
           val successors = opcodecfg.cfg.get(pc).diSuccessors.map(_.value)
 
           val res = for {
@@ -64,7 +62,7 @@ object OPCodeToSIR {
                 else Right(newStackJump(pc, irMap))
               } else Right(inStack)
             }
-            t <- convertOne(opcode, pc, stackWithJumpLocals, tempVarCount)
+            t <- convertOne(opcode, pc, stackWithJumpLocals, tempVar)
             Conversion(irCode, outStack, newTempVarCount) = t
             jumpSuccessors                                = successors.intersect(jumpTargets)
             newIr                                         = dumpStackForJumps(jumpSuccessors, outStack) ++ irCode
@@ -86,7 +84,7 @@ object OPCodeToSIR {
       opCode: OPCode,
       pc: Long,
       stack: Stack,
-      tempVarCount: Int
+      tempVar: TempVar
   ): Either[String, Conversion] = {
 
     implicit def opToIrType(tpe: OPType): IRType.Aux[tpe.A] = tpe match {
@@ -105,7 +103,7 @@ object OPCodeToSIR {
 
     /** A simple conversion that just modifies the stack */
     def nopSimple(newStack: Stack): Either[String, Conversion] =
-      Right(Conversion(Seq(SIR.Nop), newStack, tempVarCount))
+      Right(Conversion(Seq(SIR.Nop), newStack, tempVar))
 
     /** A simple conversion that just modifies the stack, but can fail */
     def nop(newStack: Either[String, Stack]): Either[String, Conversion] =
@@ -113,11 +111,11 @@ object OPCodeToSIR {
 
     /** A simple conversion that results in a new IR code, and a new stack */
     def seqSimple(ir: SIR, newStack: Stack): Either[String, Conversion] =
-      Right(Conversion(Seq(ir), newStack, tempVarCount))
+      Right(Conversion(Seq(ir), newStack, tempVar))
 
     /** A conversion that can fail that results in a new IR code, and a new stack */
     def seq(res: Either[String, (SIR, Stack)]): Either[String, Conversion] =
-      res.map(t => Conversion(Seq(t._1), t._2, tempVarCount))
+      res.map(t => Conversion(Seq(t._1), t._2, tempVar))
 
     /** Is the expression type of type 2 */
     def isCat2Type(expr: Expr[_]): Boolean = IRType.Category2.isSupertypeOf(expr.tpe)
@@ -193,46 +191,39 @@ object OPCodeToSIR {
       case OPCode.PushNull         => nopSimple(Expr.Null :: stack)
       case OPCode.Push(tpe, value) => nopSimple(Expr.ConstTpe(tpe, value) :: stack)
 
-      case OPCode.VarLoad(tpe, index) => nopSimple(Expr.GetLocal(index, opToIrType(tpe)) :: stack)
+      case OPCode.VarLoad(tpe, index) =>
+        Right(
+          Conversion(
+            Seq(SIR.GetLocal(tempVar, index)),
+            Expr.GetFakeLocal(tempVar, tpe) :: stack,
+            tempVar.inc
+          )
+        )
       case OPCode.ArrayLoad(tpe) =>
         val irTpe = opToIrType(tpe)
         stack11(IRType.Array(irTpe), IRType.Int) {
           case (e2, e1, r) =>
             Conversion(
-              Seq(SIR.NotNull(e1), SIR.ArrayIndexValid(e1.asInstanceOf[Expr[scala.Array[_]]], e2)),
-              Expr.GetArray[irTpe.A](e1, e2, irTpe) :: r,
-              tempVarCount
+              Seq(SIR.GetArray(tempVar, e1, e2)),
+              Expr.GetFakeLocal(tempVar, irTpe) :: r,
+              tempVar.inc
             )
         }
       case OPCode.VarStore(tpe, index) =>
         stack1(tpe) {
           case (_: Expr.UninitializedRef, _) => Left("Can't assign uninitialized reference to variable")
           case (e1, r) =>
-            val hasGetLocal = r.collectFirst {
-              case get @ Expr.GetLocal(`index`, _) => get
-            }
-
-            hasGetLocal match {
-              case Some(existingGetLocal) =>
-                Right(
-                  Conversion(
-                    Seq(SIR.SetFakeLocal(tempVarCount, existingGetLocal), SIR.SetLocal(index, e1)),
-                    r.map(_.substitute(existingGetLocal, Expr.GetFakeLocal(tempVarCount, existingGetLocal.tpe))),
-                    tempVarCount + 1
-                  )
-                )
-              case None => Right(Conversion(Seq(SIR.SetLocal(index, e1)), r, tempVarCount))
-            }
+            Right(Conversion(Seq(SIR.SetLocal(index, e1)), r, tempVar))
         }.flatten
       case OPCode.ArrayStore(tpe) =>
         val irTpe = opToIrType(tpe)
-        stack111(irTpe, IRType.Int, IRType.Array(irTpe)) {
-          case (_, _, _: Expr.UninitializedRef, _) => Left("Can't assign uninitialized reference to array")
-          case (e3, e2, e1, r2)                    =>
-            //TODO: Figure out what to save
-            //Treat it roughly the same as a field as it's a reference
-            Right(Conversion(Seq(SIR.NotNull(e3), SIR.SetArray(e3, e2, e1)), r2, tempVarCount))
-        }.flatten
+        seq(
+          stack111(irTpe, IRType.Int, IRType.Array(irTpe)) {
+            case (_, _, _: Expr.UninitializedRef, _) => Left("Can't assign uninitialized reference to array")
+            case (e3, e2, e1, r2) =>
+              Right((SIR.SetArray(e3, e2, e1), r2))
+          }.flatten
+        )
       case OPCode.Pop1 => nop(stack1(IRType.Category1)((_, r) => r))
       case OPCode.Pop2 =>
         nop(
@@ -300,9 +291,18 @@ object OPCodeToSIR {
       case OPCode.Xor(tpe)           => nop(stack2Add(tpe)(Expr.Xor(_, _)))
 
       case OPCode.IntVarIncr(index, amount) =>
-        seqSimple(
-          SIR.SetLocal(index, Expr.Add(Expr.ConstTpe(IRType.Int, amount), Expr.GetLocal(index, IRType.Int))),
-          stack
+        Right(
+          Conversion(
+            Seq(
+              SIR.GetLocal(tempVar, index),
+              SIR.SetLocal(
+                index,
+                Expr.Add(Expr.ConstTpe(IRType.Int, amount), Expr.GetFakeLocal(tempVar, IRType.Int))
+              )
+            ),
+            stack,
+            tempVar.inc
+          )
         )
 
       case OPCode.Conversion(from, to) => nop(stack1Add(from)(Expr.Convert(_, opToIrType(to))))
@@ -327,32 +327,28 @@ object OPCodeToSIR {
       case OPCode.Return(None)      => seqSimple(SIR.Return(None), stack)
 
       case OPCode.GetStatic(fieldRefInfo) =>
-        seqSimple(SIR.MaybeInit(fieldRefInfo.clazz), Expr.GetStatic(fieldRefInfo) :: stack)
+        Right(
+          Conversion(
+            Seq(SIR.GetStatic(tempVar, fieldRefInfo)),
+            Expr.GetFakeLocal(tempVar, IRType.fromDescriptor(fieldRefInfo.nameAndType.descriptor)) :: stack,
+            tempVar.inc
+          )
+        )
       case OPCode.PutStatic(fieldRefInfo) =>
-        stack1(IRType.Any) { (e, r) =>
-          val SemanticSave(saveIr, newTempVarCount, saveSubstitutedStack) =
-            fieldSave(r, tempVarCount, fieldRefInfo, true)
-          Conversion(
-            saveIr :+ SIR.MaybeInit(fieldRefInfo.clazz) :+ SIR.SetStatic(fieldRefInfo, e),
-            saveSubstitutedStack,
-            newTempVarCount
-          )
-        }
+        seq(stack1(IRType.Any)((e, r) => (SIR.SetStatic(fieldRefInfo, e), r)))
       case OPCode.GetField(fieldRefInfo) =>
-        seq(stack1(IRType.AnyRef)((e, r) => (SIR.NotNull(e), Expr.GetField(e, fieldRefInfo) :: r)))
-      case OPCode.PutField(fieldRefInfo) =>
-        stack2(IRType.AnyRef) { (ep, e, r) =>
-          val SemanticSave(saveIr, newTempVarCount, saveSubstitutedStack) =
-            fieldSave(r, tempVarCount, fieldRefInfo, false)
+        stack1(IRType.AnyRef)((e, r) =>
           Conversion(
-            saveIr :+ SIR.NotNull(e) :+ SIR.SetField(e, ep, fieldRefInfo),
-            saveSubstitutedStack,
-            newTempVarCount
+            Seq(SIR.GetField(tempVar, e, fieldRefInfo)),
+            Expr.GetFakeLocal(tempVar, IRType.fromDescriptor(fieldRefInfo.nameAndType.descriptor)) :: r,
+            tempVar.inc
           )
-        }
+        )
+      case OPCode.PutField(fieldRefInfo) =>
+        seq(stack2(IRType.AnyRef)((ep, e, r) => (SIR.SetField(e, ep, fieldRefInfo), r)))
 
       case invoke @ OPCode.Invoke(_, _) =>
-        handleInvoke(invoke, stack, tempVarCount, pc)
+        handleInvoke(invoke, stack, tempVar, pc)
 
       case OPCode.INVOKEDYNAMIC(indexByte1, indexByte2) => ???
 
@@ -362,17 +358,17 @@ object OPCodeToSIR {
       case OPCode.NewArray(tpe) =>
         stack1(IRType.Int) { (e, r) =>
           Conversion(
-            Seq(SIR.NotNegative(e), SIR.NewArray(tempVarCount, e, opToIrType(tpe))),
-            Expr.GetFakeLocal(tempVarCount, IRType.Array(opToIrType(tpe))) :: r,
-            tempVarCount + 1
+            Seq(SIR.NewArray(tempVar, e, opToIrType(tpe))),
+            Expr.GetFakeLocal(tempVar, IRType.Array(opToIrType(tpe))) :: r,
+            tempVar.inc
           )
         }
       case OPCode.RefNewArray(classInfo) =>
         stack1(IRType.Int) { (e, r) =>
           Conversion(
-            Seq(SIR.NotNegative(e), SIR.NewArray(tempVarCount, e, IRType.Ref(classInfo))),
-            Expr.GetFakeLocal(tempVarCount, IRType.Array(IRType.Ref(classInfo))) :: r,
-            tempVarCount + 1
+            Seq(SIR.NewArray(tempVar, e, IRType.Ref(classInfo))),
+            Expr.GetFakeLocal(tempVar, IRType.Array(IRType.Ref(classInfo))) :: r,
+            tempVar.inc
           )
         }
       case OPCode.MultiRefNewArray(classInfo, dimensions) =>
@@ -384,9 +380,6 @@ object OPCodeToSIR {
           }.toVector
 
           if (arraySizes.lengthIs == sizesExpr.length) {
-            val dimExpr  = Expr.ConstTpe(IRType.Int, dimensions)
-            val dimTests = Seq(SIR.NotNegative(dimExpr), SIR.NotZero(dimExpr)) ++ sizesExpr.map(s => SIR.NotNegative(s))
-
             val tpe =
               (0 until dimensions)
                 .foldLeft(IRType.Ref(classInfo): IRType)((tpe, _) =>
@@ -396,9 +389,9 @@ object OPCodeToSIR {
 
             Right(
               Conversion(
-                dimTests :+ SIR.NewMultiArray(tempVarCount, tpe, sizesExpr),
-                Expr.GetFakeLocal(tempVarCount, tpe) :: newStack,
-                tempVarCount + 1
+                Seq(SIR.NewMultiArray(tempVar, tpe, sizesExpr)),
+                Expr.GetFakeLocal(tempVar, tpe) :: newStack,
+                tempVar.inc
               )
             )
           } else Left(s"Found invalid stack type in multi array initialization at $pc")
@@ -409,9 +402,9 @@ object OPCodeToSIR {
       case OPCode.Cast(classInfo) =>
         stack1(IRType.AnyRef)((e, r) =>
           Conversion(
-            Seq(SIR.Cast(tempVarCount, e, IRType.Ref(classInfo))),
-            Expr.GetFakeLocal(tempVarCount, IRType.Ref(classInfo)) :: r,
-            tempVarCount + 1
+            Seq(SIR.Cast(tempVar, e, IRType.Ref(classInfo))),
+            Expr.GetFakeLocal(tempVar, IRType.Ref(classInfo)) :: r,
+            tempVar.inc
           )
         )
       case OPCode.InstanceOf(classInfo) => nop(stack1Add(IRType.AnyRef)(Expr.IsInstanceOf(_, classInfo)))
@@ -420,7 +413,7 @@ object OPCodeToSIR {
     }
   }
 
-  def handleInvoke(invoke: OPCode.Invoke, stack: Stack, tempVarCount: Int, pc: Long): Either[String, Conversion] = {
+  def handleInvoke(invoke: OPCode.Invoke, stack: Stack, tempVar: TempVar, pc: Long): Either[String, Conversion] = {
     val nameAndType = invoke.methodRefInfo.nameAndType
     val descriptor  = nameAndType.descriptor
     val mdesc = descriptor match {
@@ -443,14 +436,14 @@ object OPCodeToSIR {
         val (params, newStack) = stack.splitAt(callParamsCount)
 
         if (callType == SIR.CallType.Special && nameAndType.name == "<init>")
-          handleInit(params, newStack, tempVarCount, pc)
+          handleInit(params, newStack, tempVar, pc)
         else
-          handleMethodCall(params, newStack, invoke.methodRefInfo, desc, callType, tempVarCount, pc)
+          handleMethodCall(params, newStack, invoke.methodRefInfo, desc, callType, tempVar, pc)
       } else Left(s"Not enough stack params for call at $pc")
     }
   }
 
-  def handleInit(params: Stack, stack: Stack, tempVarCount: Int, pc: Long): Either[String, Conversion] = {
+  def handleInit(params: Stack, stack: Stack, tempVar: TempVar, pc: Long): Either[String, Conversion] = {
     val paramsInit = params.init
     val paramsLast = params.last
     val paramsVec = paramsInit.toVector.collect {
@@ -460,21 +453,15 @@ object OPCodeToSIR {
     if (paramsInit.lengthIs == paramsVec.length) {
       paramsLast match {
         case uninit @ Expr.UninitializedRef(atAddress, classInfo) =>
-          val SemanticSave(saveIr, newTempVarCount, saveSubstitutedStack) = heapSave(stack, tempVarCount)
-
-          val codes = saveIr :+ SIR.New(newTempVarCount, classInfo, paramsVec)
           Right(
             Conversion(
-              codes,
-              saveSubstitutedStack.map(_.substitute(uninit, Expr.GetFakeLocal(tempVarCount, IRType.Ref(classInfo)))),
-              newTempVarCount + 1
+              Seq(SIR.New(tempVar, classInfo, paramsVec)),
+              stack.map(_.substitute(uninit, Expr.GetFakeLocal(tempVar, IRType.Ref(classInfo)))),
+              tempVar.inc
             )
           )
         case expr =>
-          val SemanticSave(saveIr, newTempVarCount, saveSubstitutedStack) = heapSave(stack, tempVarCount)
-
-          val codes = SIR.NotNull(expr) +: saveIr :+ SIR.CallSuper(expr, paramsVec)
-          Right(Conversion(codes, saveSubstitutedStack, newTempVarCount))
+          Right(Conversion(Seq(SIR.CallSuper(expr, paramsVec)), stack, tempVar))
       }
     } else Left(s"Found uninitialized reference in object creation call at $pc")
   }
@@ -485,7 +472,7 @@ object OPCodeToSIR {
       methodInfo: MethodInfo,
       desc: Descriptor.MethodDescriptor,
       callType: SIR.CallType,
-      tempVarCount: Int,
+      tempVar: TempVar,
       pc: Long
   ): Either[String, Conversion] = {
     val paramsVec = params.toVector.reverse.collect {
@@ -494,91 +481,29 @@ object OPCodeToSIR {
     val methodName = methodInfo.nameAndType.name
 
     if (params.lengthIs == paramsVec.length) {
-      val SemanticSave(saveIr, newTempVarCount, saveSubstitutedStack) = heapSave(stack, tempVarCount)
-      val codes = if (callType == SIR.CallType.Static) {
-        saveIr :+ SIR.Call(newTempVarCount, callType, methodInfo.clazz, methodName, desc, None, paramsVec)
-      } else {
-        val e = paramsVec.head
-
-        saveIr :+ SIR.NotNull(e) :+ SIR.Call(
-          newTempVarCount,
+      val call = Seq(
+        SIR.Call(
+          tempVar,
           callType,
           methodInfo.clazz,
           methodName,
           desc,
-          Some(e),
+          if (callType == SIR.CallType.Static) None else Some(paramsVec.head),
           paramsVec.tail
         )
-      }
+      )
 
-      if (desc.returnType == Descriptor.VoidType) Right(Conversion(codes, saveSubstitutedStack, newTempVarCount + 1))
-      else
-        Right(
-          Conversion(
-            codes,
-            Expr.GetFakeLocal(newTempVarCount, IRType.Unknown: IRType.Aux[_]) :: saveSubstitutedStack,
-            newTempVarCount + 1
+      desc.returnType match {
+        case Descriptor.VoidType => Right(Conversion(call, stack, tempVar.inc))
+        case returnType: Descriptor.FieldType =>
+          Right(
+            Conversion(
+              call,
+              Expr.GetFakeLocal(tempVar, IRType.fromDescriptor(returnType)) :: stack,
+              tempVar.inc
+            )
           )
-        )
+      }
     } else Left(s"Found uninitialized reference in method call at $pc")
-  }
-
-  sealed trait FieldSaveInfo
-  case class InstanceFieldSave(e: Expr[_], field: FieldRefInfo) extends FieldSaveInfo
-  case class StaticFieldSave(field: FieldRefInfo)               extends FieldSaveInfo
-
-  def fieldSave(stack: Stack, tempVarCount: Int, fieldInfo: FieldSaveInfo): SemanticSave = {
-    val (tpe, toSubstitute) = fieldInfo match {
-      case InstanceFieldSave(fieldExpr, field) =>
-        (IRType.fromDescriptor(field.nameAndType.descriptor), Expr.GetField(fieldExpr, field))
-
-      case StaticFieldSave(field) =>
-        (IRType.fromDescriptor(field.nameAndType.descriptor), Expr.GetStatic(field))
-    }
-
-    val substitute: Int => FunctionK[Expr, Expr] = tempVar =>
-      new FunctionK[Expr, Expr] {
-        override def apply[A](expr: Expr[A]): Expr[A] = expr.substitute(toSubstitute, Expr.GetFakeLocal(tempVar, tpe))
-      }
-
-    save(stack, tempVarCount, substitute)
-  }
-
-  def heapSave(stack: Stack, tempVarCount: Int): SemanticSave = {
-    val substitute: Int => FunctionK[Expr, Expr] = tempVar => {
-      lazy val substituteGetField = new FunctionK[Expr, Expr] {
-        override def apply[A](expr: Expr[A]): Expr[A] = expr match {
-          case Expr.GetField(_, field) =>
-            Expr.GetFakeLocal(tempVar, IRType.fromDescriptor(field.nameAndType.descriptor))
-          case Expr.GetStatic(field) => Expr.GetFakeLocal(tempVar, IRType.fromDescriptor(field.nameAndType.descriptor))
-          case _                     => expr.modifyChildren(substituteGetField)
-        }
-      }
-
-      substituteGetField
-    }
-
-    save(stack, tempVarCount, substitute)
-  }
-
-  def save(stack: Stack, tempVarCount: Int, substitute: Int => FunctionK[Expr, Expr]): SemanticSave = {
-    val (substitutions, newTempVarCount) = stack.foldLeft((Nil: List[(Expr[_], Expr[_], Boolean, Int)], tempVarCount)) {
-      case ((acc, tempVar), expr) =>
-        val substitutedExpr = substitute(tempVar)(expr)
-        val hadFieldAccess  = substitutedExpr != expr
-        val newTempVar      = if (hadFieldAccess) tempVar + 1 else tempVar
-
-        ((expr, substitutedExpr, hadFieldAccess, tempVar) :: acc, newTempVar)
-    }
-
-    val saveIr = substitutions.collect {
-      case (expr, _, true, tempVarIndex) => SIR.SetFakeLocal(tempVarIndex, expr)
-    }.reverse
-
-    val substitutedStack = substitutions.reverseIterator.map {
-      case (_, substitution, _, _) => substitution
-    }
-
-    SemanticSave(saveIr, newTempVarCount, substitutedStack.to(List))
   }
 }

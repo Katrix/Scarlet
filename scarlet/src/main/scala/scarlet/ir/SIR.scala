@@ -14,6 +14,12 @@ import scala.annotation.tailrec
   * the decompiler.
   *
   * Based on this paper: http://people.irisa.fr/David.Pichardie/papers/aplas10.pdf
+  *
+  * We do make a few big changes away from that paper though. The first is that
+  * anything that reads from a mutable value assigns a new temp var, which is
+  * what we push to the stack instead. This removes the need for substitution
+  * when a mutable value is set after we have read it to the stack, but not used
+  * it yet.
   */
 sealed trait SIR {
 
@@ -28,6 +34,10 @@ sealed trait SIR {
   def modifyExpr(f: FunctionK[Expr, Expr]): SIR = this
 }
 object SIR {
+
+  class TempVar(val index: Int) extends AnyVal {
+    def inc: TempVar = new TempVar(index + 1)
+  }
 
   /**
     * Unlike the expressions in the referenced paper, we do quite a bit of
@@ -414,43 +424,12 @@ object SIR {
         Compare(f(e1), f(e2), nanBehavior)
     }
 
-    case class GetLocal[A](index: Int, tpe: Type.Aux[A]) extends Expr[A] {
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = {
-        if (index == 0) "this"
-        else
-          syntaxExtra.methodParams.flatMap(_.parameters.lift(index - 1)).flatMap(_.name) match {
-            case Some(name) => s"($name: ${tpe.describe})"
-            case None       => s"(var_$index: ${tpe.describe})"
-          }
-      }
-    }
-    case class GetFakeLocal[A](index: Int, tpe: Type.Aux[A]) extends Expr[A] {
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(local_$index: ${tpe.describe})"
+    case class GetFakeLocal[A](tempVar: TempVar, tpe: Type.Aux[A]) extends Expr[A] {
+      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(local_${tempVar.index}: ${tpe.describe})"
     }
     case class GetStackLocal[A](index: Int, jumpTarget: Long, tpe: Type.Aux[A]) extends Expr[A] {
       override def toSyntax(implicit syntaxExtra: SyntaxExtra): String =
         s"(stack_${index}_$jumpTarget: ${tpe.describe})"
-    }
-    case class GetField(e: Expr[_], fieldRefInfo: FieldRefInfo) extends Expr[Any] {
-      override def tpe: Type.Aux[Any] =
-        Type.fromDescriptor(fieldRefInfo.nameAndType.descriptor).asInstanceOf[Type.Aux[Any]]
-
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String =
-        s"(${e.toSyntax}.${fieldRefInfo.nameAndType.name}: ${tpe.describe})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[Any] =
-        if (this == target) newExpr.asInstanceOf[Expr[Any]]
-        else GetField(e.substitute(target, newExpr), fieldRefInfo)
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[Any] =
-        GetField(f(e), fieldRefInfo)
-    }
-    case class GetStatic(fieldRefInfo: FieldRefInfo) extends Expr[Any] {
-      override def tpe: Type.Aux[Any] =
-        Type.fromDescriptor(fieldRefInfo.nameAndType.descriptor).asInstanceOf[Type.Aux[Any]]
-
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String =
-        s"(${fieldRefInfo.clazz.name}.${fieldRefInfo.nameAndType.name}: ${tpe.describe})"
     }
 
     case class IsInstanceOf(e: Expr[_], classInfo: ClassInfo) extends Expr[Int] {
@@ -476,18 +455,6 @@ object SIR {
       override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[Int] =
         ArrayLength(f(e))
     }
-
-    case class GetArray[A](e: Expr[Array[A]], idx: Expr[Int], tpe: Type.Aux[A]) extends Expr[A] {
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String =
-        s"(${e.toSyntax}[${idx.toSyntax}]: ${tpe.describe})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else GetArray(e.substitute(target, newExpr), idx.substitute(target, newExpr), tpe)
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        GetArray(f(e), f(idx), tpe)
-    }
   }
 
   sealed trait CallType
@@ -500,13 +467,6 @@ object SIR {
 
   case object Nop                        extends SIR
   case class MaybeInit(clazz: ClassInfo) extends SIR
-  case class NotNull(expr: Expr[_]) extends SIR {
-    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      NotNull(expr.substitute(target, newExpr))
-
-    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      NotNull(f(expr))
-  }
   case class NotZero(expr: Expr[_]) extends SIR {
     override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
       NotZero(expr.substitute(target, newExpr))
@@ -514,20 +474,7 @@ object SIR {
     override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
       NotZero(f(expr))
   }
-  case class NotNegative(expr: Expr[Int]) extends SIR {
-    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      NotNegative(expr.substitute(target, newExpr))
-
-    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      NotNegative(f(expr))
-  }
-  case class ArrayIndexValid(array: Expr[Array[_]], index: Expr[Int]) extends SIR {
-    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      ArrayIndexValid(array.substitute(target, newExpr), index.substitute(target, newExpr))
-
-    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      ArrayIndexValid(f(array), f(index))
-  }
+  case class GetLocal(tempVar: TempVar, index: Int) extends SIR
   case class SetLocal(index: Int, e: Expr[_]) extends SIR {
     override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
       SetLocal(index, e.substitute(target, newExpr))
@@ -535,12 +482,12 @@ object SIR {
     override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
       SetLocal(index, f(e))
   }
-  case class SetFakeLocal(index: Int, e: Expr[_]) extends SIR {
+  case class SetFakeLocal(tempVar: TempVar, e: Expr[_]) extends SIR {
     override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      SetFakeLocal(index, e.substitute(target, newExpr))
+      SetFakeLocal(tempVar, e.substitute(target, newExpr))
 
     override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      SetFakeLocal(index, f(e))
+      SetFakeLocal(tempVar, f(e))
   }
   case class SetStackLocal(index: Int, pc: Long, e: Expr[_]) extends SIR {
     override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
@@ -549,12 +496,26 @@ object SIR {
     override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
       SetStackLocal(index, pc, f(e))
   }
+  case class GetArray[A](tempVar: TempVar, arr: Expr[Array[A]], idx: Expr[Int]) extends SIR {
+    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
+      GetArray(tempVar, arr.substitute(target, newExpr), idx.substitute(target, newExpr))
+
+    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
+      GetArray(tempVar, f(arr), f(idx))
+  }
   case class SetArray[A](arr: Expr[Array[A]], idx: Expr[Int], obj: Expr[A]) extends SIR {
     override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
       SetArray(arr.substitute(target, newExpr), idx.substitute(target, newExpr), obj.substitute(target, newExpr))
 
     override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
       SetArray(f(arr), f(idx), f(obj))
+  }
+  case class GetField(tempVar: TempVar, e: Expr[_], fieldRefInfo: FieldRefInfo) extends SIR {
+    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
+      GetField(tempVar, e.substitute(target, newExpr), fieldRefInfo)
+
+    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
+      GetField(tempVar, f(e), fieldRefInfo)
   }
   case class SetField(e: Expr[_], f: Expr[_], fieldRefInfo: FieldRefInfo) extends SIR {
     override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
@@ -563,6 +524,7 @@ object SIR {
     override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
       SetField(f(e), f(this.f), fieldRefInfo)
   }
+  case class GetStatic(tempVar: TempVar, fieldRefInfo: FieldRefInfo) extends SIR
   case class SetStatic(fieldRefInfo: FieldRefInfo, e: Expr[_]) extends SIR {
     override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
       SetStatic(fieldRefInfo, e.substitute(target, newExpr))
@@ -570,12 +532,12 @@ object SIR {
     override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
       SetStatic(fieldRefInfo, f(e))
   }
-  case class New(varIndex: Int, clazz: ClassInfo, variables: Seq[Expr[_]]) extends SIR {
+  case class New(tempVar: TempVar, clazz: ClassInfo, variables: Seq[Expr[_]]) extends SIR {
     override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      New(varIndex, clazz, variables.map(_.substitute(target, newExpr)))
+      New(tempVar, clazz, variables.map(_.substitute(target, newExpr)))
 
     override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      New(varIndex, clazz, variables.map(f(_)))
+      New(tempVar, clazz, variables.map(f(_)))
   }
   case class CallSuper(e: Expr[_], variables: Seq[Expr[_]]) extends SIR {
     override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
@@ -585,7 +547,7 @@ object SIR {
       CallSuper(f(e), variables.map(f(_)))
   }
   case class Call(
-      varIndex: Int,
+      tempVar: TempVar,
       callType: CallType,
       clazz: ClassInfo,
       name: String,
@@ -595,7 +557,7 @@ object SIR {
   ) extends SIR {
     override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
       Call(
-        varIndex,
+        tempVar,
         callType,
         clazz,
         name,
@@ -605,21 +567,21 @@ object SIR {
       )
 
     override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      Call(varIndex, callType, clazz, name, descriptor, obj.map(f(_)), variables.map(f(_)))
+      Call(tempVar, callType, clazz, name, descriptor, obj.map(f(_)), variables.map(f(_)))
   }
-  case class NewArray[A](varIndex: Int, size: Expr[Int], arrTpe: Type.Aux[A]) extends SIR {
+  case class NewArray[A](tempVar: TempVar, size: Expr[Int], arrTpe: Type.Aux[A]) extends SIR {
     override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      NewArray(varIndex, size.substitute(target, newExpr), arrTpe)
+      NewArray(tempVar, size.substitute(target, newExpr), arrTpe)
 
     override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      NewArray(varIndex, f(size), arrTpe)
+      NewArray(tempVar, f(size), arrTpe)
   }
-  case class NewMultiArray(varIndex: Int, tpe: Type.Aux[Array[_]], sizesExpr: Vector[Expr[Int]]) extends SIR {
+  case class NewMultiArray(tempVar: TempVar, tpe: Type.Aux[Array[_]], sizesExpr: Vector[Expr[Int]]) extends SIR {
     override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      NewMultiArray(varIndex, tpe, sizesExpr.map(_.substitute(target, newExpr)))
+      NewMultiArray(tempVar, tpe, sizesExpr.map(_.substitute(target, newExpr)))
 
     override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      NewMultiArray(varIndex, tpe, sizesExpr.map(f(_)))
+      NewMultiArray(tempVar, tpe, sizesExpr.map(f(_)))
   }
   case class If(expr: Expr[Boolean], branchPC: Long) extends SIR {
     override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
@@ -657,12 +619,12 @@ object SIR {
     override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
       MonitorExit(f(e))
   }
-  case class Cast(varIndex: Int, e: Expr[_], to: Type) extends SIR {
+  case class Cast(tempVar: TempVar, e: Expr[_], to: Type) extends SIR {
     override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      Cast(varIndex, e.substitute(target, newExpr), to)
+      Cast(tempVar, e.substitute(target, newExpr), to)
 
     override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      Cast(varIndex, f(e), to)
+      Cast(tempVar, f(e), to)
   }
 
   case class SyntaxExtra(methodParams: Option[MethodParameters])
@@ -670,9 +632,7 @@ object SIR {
   def toSyntax(sir: SIR)(implicit syntaxExtra: SyntaxExtra): Seq[String] = sir match {
     case Nop              => Nil
     case MaybeInit(clazz) => Seq(s"${clazz.name}.<clinit>")
-    case NotNull(expr)    => Seq(s"notNull(${expr.toSyntax})")
     case NotZero(expr)    => Seq(s"notZero(${expr.toSyntax})")
-    case NotNegative(e)   => Seq(s"notNegative(${e.toSyntax})")
     case SetLocal(index, e) =>
       Seq(syntaxExtra.methodParams.flatMap(_.parameters.lift(index - 1)).flatMap(_.name) match {
         case Some(name) => s"var $name = ${e.toSyntax}"
