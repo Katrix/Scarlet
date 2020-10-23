@@ -162,9 +162,14 @@ object SIR {
       if (target == this) newExpr.asInstanceOf[Expr[A]] else this
 
     /**
-      * Modify the child expressions this expression contains.
+      * Modify this expressions children.
       */
     def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] = this
+
+    /**
+      * If this expression contains the target
+      */
+    def contains(target: Expr[_]): Boolean = target == this
   }
   object Expr {
     case class UninitializedRef(atAddress: Long, classInfo: ClassInfo) extends Expr[AnyRef] {
@@ -448,18 +453,6 @@ object SIR {
         s"(${fieldRefInfo.clazz.name}.${fieldRefInfo.nameAndType.name}: ${tpe.describe})"
     }
 
-    case class Cast(e: Expr[_], classInfo: ClassInfo) extends Expr[AnyRef] {
-      override def tpe: Type.Aux[AnyRef]                               = Type.Ref(classInfo)
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"${e.toSyntax}.asInstanceOf[${tpe.describe}]"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[AnyRef] =
-        if (this == target) newExpr.asInstanceOf[Expr[AnyRef]]
-        else Cast(e.substitute(target, newExpr), classInfo)
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[AnyRef] =
-        Cast(f(e), classInfo)
-    }
-
     case class IsInstanceOf(e: Expr[_], classInfo: ClassInfo) extends Expr[Int] {
       override def tpe: Type.Aux[Int]                                  = Type.Int
       override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"${e.toSyntax}.isInstanceOf[${tpe.describe}]"
@@ -528,12 +521,26 @@ object SIR {
     override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
       NotNegative(f(expr))
   }
+  case class ArrayIndexValid(array: Expr[Array[_]], index: Expr[Int]) extends SIR {
+    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
+      ArrayIndexValid(array.substitute(target, newExpr), index.substitute(target, newExpr))
+
+    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
+      ArrayIndexValid(f(array), f(index))
+  }
   case class SetLocal(index: Int, e: Expr[_]) extends SIR {
     override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
       SetLocal(index, e.substitute(target, newExpr))
 
     override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
       SetLocal(index, f(e))
+  }
+  case class SetFakeLocal(index: Int, e: Expr[_]) extends SIR {
+    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
+      SetFakeLocal(index, e.substitute(target, newExpr))
+
+    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
+      SetFakeLocal(index, f(e))
   }
   case class SetStackLocal(index: Int, pc: Long, e: Expr[_]) extends SIR {
     override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
@@ -649,6 +656,13 @@ object SIR {
 
     override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
       MonitorExit(f(e))
+  }
+  case class Cast(varIndex: Int, e: Expr[_], to: Type) extends SIR {
+    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
+      Cast(varIndex, e.substitute(target, newExpr), to)
+
+    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
+      Cast(varIndex, f(e), to)
   }
 
   case class SyntaxExtra(methodParams: Option[MethodParameters])

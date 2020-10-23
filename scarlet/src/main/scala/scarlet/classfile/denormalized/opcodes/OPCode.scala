@@ -12,30 +12,34 @@ object OPCode {
   /**
     * The type an opcode operates on.
     */
-  trait Type[A]
+  trait Type {
+    type A
+  }
   object Type {
-    case object Boolean extends Type[scala.Boolean]
-    case object Byte    extends Type[scala.Byte]
-    case object Short   extends Type[scala.Short]
-    case object Int     extends Type[scala.Int]
-    case object Long    extends Type[scala.Long]
-    case object Float   extends Type[scala.Float]
-    case object Double  extends Type[scala.Double]
-    case object Char    extends Type[scala.Char]
-    case object String  extends Type[Predef.String]
-    case object Class   extends Type[Predef.String]
-    case object Ref     extends Type[scala.AnyRef]
+    type Aux[A0] = Type { type A = A0 }
+
+    case object Boolean extends Type { type A = scala.Boolean }
+    case object Byte    extends Type { type A = scala.Byte    }
+    case object Short   extends Type { type A = scala.Short   }
+    case object Int     extends Type { type A = scala.Int     }
+    case object Long    extends Type { type A = scala.Long    }
+    case object Float   extends Type { type A = scala.Float   }
+    case object Double  extends Type { type A = scala.Double  }
+    case object Char    extends Type { type A = scala.Char    }
+    case object String  extends Type { type A = Predef.String }
+    case object Class   extends Type { type A = Predef.String }
+    case object Ref     extends Type { type A = scala.AnyRef  }
   }
 
   case object Nop      extends OPCode
   case object PushNull extends OPCode
 
-  case class Push[A](tpe: Type[A], value: A) extends OPCode
+  case class Push[A](tpe: Type.Aux[A], value: A) extends OPCode
 
-  case class VarLoad(tpe: Type[_], index: Int)  extends OPCode
-  case class ArrayLoad(tpe: Type[_])            extends OPCode
-  case class VarStore(tpe: Type[_], index: Int) extends OPCode
-  case class ArrayStore(tpe: Type[_])           extends OPCode
+  case class VarLoad(tpe: Type, index: Int)  extends OPCode
+  case class ArrayLoad(tpe: Type)            extends OPCode
+  case class VarStore(tpe: Type, index: Int) extends OPCode
+  case class ArrayStore(tpe: Type)           extends OPCode
 
   case object Pop1   extends OPCode
   case object Pop2   extends OPCode
@@ -47,26 +51,26 @@ object OPCode {
   case object Dup2X2 extends OPCode
   case object Swap   extends OPCode
 
-  case class Add(tpe: Type[_])  extends OPCode
-  case class Sub(tpe: Type[_])  extends OPCode
-  case class Mult(tpe: Type[_]) extends OPCode
-  case class Div(tpe: Type[_])  extends OPCode
-  case class Rem(tpe: Type[_])  extends OPCode
-  case class Neg(tpe: Type[_])  extends OPCode
+  case class Add(tpe: Type)  extends OPCode
+  case class Sub(tpe: Type)  extends OPCode
+  case class Mult(tpe: Type) extends OPCode
+  case class Div(tpe: Type)  extends OPCode
+  case class Rem(tpe: Type)  extends OPCode
+  case class Neg(tpe: Type)  extends OPCode
 
-  case class ShiftLeft(tpe: Type[_])     extends OPCode
-  case class ShiftRight(tpe: Type[_])    extends OPCode
-  case class LogShiftRight(tpe: Type[_]) extends OPCode
+  case class ShiftLeft(tpe: Type)     extends OPCode
+  case class ShiftRight(tpe: Type)    extends OPCode
+  case class LogShiftRight(tpe: Type) extends OPCode
 
-  case class And(tpe: Type[_]) extends OPCode
-  case class Or(tpe: Type[_])  extends OPCode
-  case class Xor(tpe: Type[_]) extends OPCode
+  case class And(tpe: Type) extends OPCode
+  case class Or(tpe: Type)  extends OPCode
+  case class Xor(tpe: Type) extends OPCode
 
   case class IntVarIncr(index: Int, amount: Int) extends OPCode
 
-  case class Conversion(from: Type[_], to: Type[_]) extends OPCode
+  case class Conversion(from: Type, to: Type) extends OPCode
 
-  case class Compare(tpe: Type[_], nanBehavior: NanBehavior) extends OPCode
+  case class Compare(tpe: Type, nanBehavior: NanBehavior) extends OPCode
   sealed trait NanBehavior
   object NanBehavior {
     case object IsIntegral extends NanBehavior
@@ -103,7 +107,7 @@ object OPCode {
 
   case class Goto(branchPC: Long)                                extends OPCode
   case class Switch(defaultPC: Long, pairs: Vector[(Int, Long)]) extends OPCode
-  case class Return(tpe: Option[Type[_]])                        extends OPCode
+  case class Return(tpe: Option[Type])                        extends OPCode
 
   case class GetStatic(fieldRefInfo: FieldRefInfo) extends OPCode
   case class PutStatic(fieldRefInfo: FieldRefInfo) extends OPCode
@@ -124,7 +128,7 @@ object OPCode {
   case class MethodInfo(clazz: ClassInfo, nameAndType: NameAndTypeInfo)
 
   case class New(classInfo: ClassInfo)                               extends OPCode
-  case class NewArray(tpe: Type[_])                                  extends OPCode
+  case class NewArray(tpe: Type)                                  extends OPCode
   case class RefNewArray(classInfo: ClassInfo)                       extends OPCode
   case class MultiRefNewArray(classInfo: ClassInfo, dimensions: Int) extends OPCode
   case object ArrayLength                                            extends OPCode
