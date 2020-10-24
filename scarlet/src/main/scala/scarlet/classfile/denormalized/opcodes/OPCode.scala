@@ -107,7 +107,7 @@ object OPCode {
 
   case class Goto(branchPC: Long)                                extends OPCode
   case class Switch(defaultPC: Long, pairs: Vector[(Int, Long)]) extends OPCode
-  case class Return(tpe: Option[Type])                        extends OPCode
+  case class Return(tpe: Option[Type])                           extends OPCode
 
   case class GetStatic(fieldRefInfo: FieldRefInfo) extends OPCode
   case class PutStatic(fieldRefInfo: FieldRefInfo) extends OPCode
@@ -128,7 +128,7 @@ object OPCode {
   case class MethodInfo(clazz: ClassInfo, nameAndType: NameAndTypeInfo)
 
   case class New(classInfo: ClassInfo)                               extends OPCode
-  case class NewArray(tpe: Type)                                  extends OPCode
+  case class NewArray(tpe: Type)                                     extends OPCode
   case class RefNewArray(classInfo: ClassInfo)                       extends OPCode
   case class MultiRefNewArray(classInfo: ClassInfo, dimensions: Int) extends OPCode
   case object ArrayLength                                            extends OPCode

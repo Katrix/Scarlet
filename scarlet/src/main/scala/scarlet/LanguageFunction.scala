@@ -193,7 +193,7 @@ object LanguageFunction {
 
   private def cfgDotEdgeTransformer(
       root: DotRootGraph
-  )(innerEdge: Graph[CFG.CodeBasicBlock, DiEdge]#EdgeT): Option[(DotGraph, DotEdgeStmt)] =
+  )(innerEdge: Graph[CFG.OPCodeBasicBlock, DiEdge]#EdgeT): Option[(DotGraph, DotEdgeStmt)] =
     innerEdge.edge match {
       case DiEdge(source, target) =>
         Some(
@@ -233,11 +233,11 @@ object LanguageFunction {
         Unit,
         Unit,
         NEL[String],
-        graph.CFG[graph.CFG.CodeBasicBlock]
+        graph.CFG[graph.CFG.OPCodeBasicBlock]
       ]] {
     override def process(
         in: ClassfileWithData[Unit, Unit, NEL[String], SIRCode]
-    ): EitherNel[String, ClassfileWithData[Unit, Unit, NEL[String], graph.CFG[graph.CFG.CodeBasicBlock]]] = {
+    ): EitherNel[String, ClassfileWithData[Unit, Unit, NEL[String], graph.CFG[graph.CFG.OPCodeBasicBlock]]] = {
       Right(
         in.rightmapMethod { sirCode =>
           def remapExprJump[B](expr: ir.SIR.Expr[B]): ir.SIR.Expr[B] = expr match {
@@ -259,18 +259,18 @@ object LanguageFunction {
           val remaped =
             sirCode.flatMap(t1 => t1._2.code.zipWithIndex.map(t2 => (t1._1 * 1000 + t2._2) -> remapJump(t2._1)))
 
-          CFG.createFromSIR(remaped)
+          CFG.createFromOPCode(remaped)
         }
       )
     }
 
     override def print(
-        out: ClassfileWithData[Unit, Unit, NEL[String], graph.CFG[graph.CFG.CodeBasicBlock]]
+        out: ClassfileWithData[Unit, Unit, NEL[String], graph.CFG[graph.CFG.OPCodeBasicBlock]]
     ): fansi.Str = {
       val dotOut = out.rightmapMethod { cfg =>
         val root = DotRootGraph(directed = true, Some(Id("CodeCFG")))
 
-        def nodeTransformer(innerNode: Graph[CFG.CodeBasicBlock, DiEdge]#NodeT): Option[(DotGraph, DotNodeStmt)] =
+        def nodeTransformer(innerNode: Graph[CFG.OPCodeBasicBlock, DiEdge]#NodeT): Option[(DotGraph, DotNodeStmt)] =
           Some(
             (
               root,
@@ -295,11 +295,11 @@ object LanguageFunction {
 
   object `SIR-CFG-Syntax`
       extends LanguageFunction[
-        ClassfileWithData[Unit, Unit, NEL[String], graph.CFG[graph.CFG.CodeBasicBlock]],
+        ClassfileWithData[Unit, Unit, NEL[String], graph.CFG[graph.CFG.OPCodeBasicBlock]],
         ClassfileWithData[Unit, Unit, NEL[String], String]
       ] {
     override def process(
-        in: ClassfileWithData[Unit, Unit, NEL[String], CFG[CFG.CodeBasicBlock]]
+        in: ClassfileWithData[Unit, Unit, NEL[String], CFG[CFG.OPCodeBasicBlock]]
     ): EitherNel[String, ClassfileWithData[Unit, Unit, NEL[String], String]] =
       Right(
         in.rightmapMethodWithMethod { (method, cfg) =>
@@ -309,7 +309,7 @@ object LanguageFunction {
             case params: MethodParameters => params
           })
 
-          def nodeTransformer(innerNode: Graph[CFG.CodeBasicBlock, DiEdge]#NodeT): Option[(DotGraph, DotNodeStmt)] =
+          def nodeTransformer(innerNode: Graph[CFG.OPCodeBasicBlock, DiEdge]#NodeT): Option[(DotGraph, DotNodeStmt)] =
             Some(
               (
                 root,

@@ -482,6 +482,7 @@ object SIR {
     override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
       SetLocal(index, f(e))
   }
+  case class IntVarIncr(index: Int, amount: Int) extends SIR
   case class SetFakeLocal(tempVar: TempVar, e: Expr[_]) extends SIR {
     override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
       SetFakeLocal(tempVar, e.substitute(target, newExpr))

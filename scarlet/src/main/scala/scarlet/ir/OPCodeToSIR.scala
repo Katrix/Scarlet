@@ -1,13 +1,14 @@
 package scarlet.ir
 
+import scalax.collection.edge.LDiEdge
 import scarlet.classfile.denormalized.Descriptor
 import scarlet.classfile.denormalized.opcodes.OPCode
 import scarlet.classfile.denormalized.opcodes.OPCode.{MethodInfo, Type => OPType}
-import scarlet.graph.OPCodeCFG
+import scarlet.graph.CFG
 import scarlet.ir.SIR.{Expr, TempVar, Type => IRType}
 
-import scala.collection.immutable.LongMap
-import scala.language.implicitConversions
+import scala.collection.immutable.{LongMap, TreeMap}
+import scala.language.{existentials, implicitConversions}
 
 /**
   * A converter from denormalized opcodes to [[SIR]].
@@ -19,65 +20,162 @@ object OPCodeToSIR {
   type Stack         = List[Expr[_]]
   type CodeWithStack = LongMap[StackFrame]
 
-  case class StackFrame(before: Stack, op: OPCode, code: Vector[SIR], after: Stack)
+  case class StackFrame(before: Stack, op: OPCode, code: SIR, after: Stack)
+  case class BlockStep[A](
+      accNodes: Map[A, CFG.SIRBlock],
+      predecessorsInfo: Map[A, StackInfo],
+      tempVar: TempVar
+  )
   case class StackStep(stack: Stack, irMap: CodeWithStack, tempVar: TempVar)
-  case class Conversion(code: Seq[SIR], stack: Stack, tempVar: TempVar)
-  case class SemanticSave(saveIr: Seq[SIR], newTempVarCount: Int, saveSubstitutedStack: Stack)
+  case class CodeStep(code: SIR, stack: Stack, tempVar: TempVar)
 
-  def convert(
-      code: LongMap[OPCode],
-      opcodecfg: OPCodeCFG
-  ): Either[(String, CodeWithStack), CodeWithStack] = {
+  case class StackInfo(types: List[IRType])
+  object StackInfo {
+    val Empty: StackInfo = StackInfo(Nil)
+
+    def stackFromInfo(info: StackInfo, jumpTarget: Long): Stack = info.types.zipWithIndex.map {
+      case (tpe, idx) =>
+        Expr.GetStackLocal(idx, jumpTarget, tpe)
+    }
+
+    def fromStack(stack: Stack): StackInfo = StackInfo(stack.map(_.tpe))
+  }
+
+  def convert(code: CFG[CFG.OPCodeBasicBlock]): CFG[CFG.SIRBlock] = {
     import cats.syntax.all._
+    import scalax.collection.GraphPredef._
+    import scalax.collection.edge.Implicits._
+    import scalax.collection.immutable.Graph
 
-    val jumpTargets: Set[Long] = opcodecfg.jumpTargets
+    val strongComponents = code.graph.strongComponentTraverser().toVector
 
-    def dumpStackForJumps(targetPoints: Set[Long], stack: Stack): Vector[SIR] =
-      targetPoints.flatMap { tp =>
-        stack.zipWithIndex.collect {
-          case (e: Expr[_], idx) =>
-            SIR.SetStackLocal(idx, tp, e)
+    val sortedNodes = if (strongComponents.length > 1) {
+      val sccEdges = for {
+        c1 <- strongComponents
+        c2 <- strongComponents
+        if c1.ne(c2)
+        n1 <- c1.nodes
+        n2 <- c2.nodes
+        if code.graph.contains(n1.value ~> n2.value)
+      } yield (c1 ~+> c2)((n1, n2))
+
+      val scc: Graph[code.graph.Component, Lambda[A => LDiEdge[A] { type L1 = (code.graph.NodeT, code.graph.NodeT) }]] =
+        Graph(sccEdges: _*)
+      scc.topologicalSortByComponent.toVector
+        .flatMap(_.getOrElse(sys.error("impossible")).toVector)
+        .distinct
+        .flatMap { sccNode =>
+          if (sccNode.value.nodes.size == 1) {
+            Seq(sccNode.value.nodes.head)
+          } else {
+            val subgraph = sccNode.value.to(Graph)
+            val startNode =
+              sccNode.incoming.headOption.map(_.label._2).map(n => subgraph.get(n.value)).getOrElse(subgraph.nodes.head)
+
+            subgraph.innerNodeTraverser(startNode).toVector
+          }
         }
+    } else {
+      code.graph.innerNodeTraverser(code.graph.get(code.start)).toVector
+    }
+
+    def dumpStackSingle(node: code.graph.NodeT, stack: Stack): Vector[SIR] = {
+      val leaderPc = node.value.code.firstKey
+      stack.zipWithIndex.map {
+        case (e, idx) =>
+          SIR.SetStackLocal(idx, leaderPc, e)
       }.toVector
+    }
 
-    def newStackJump(jumpTarget: Long, code: CodeWithStack): Stack =
-      code.values
-        .flatMap(_.code)
-        .collect {
-          case SIR.SetStackLocal(index, `jumpTarget`, e) => Expr.GetStackLocal(index, jumpTarget, e.tpe)
-        }
-        .toList
-
-    code.toVector
-      .foldLeft(
-        StackStep(List.empty[Expr[_]], LongMap.empty[StackFrame], new TempVar(0)).asRight[(String, CodeWithStack)]
-      ) {
-        case (Right(StackStep(inStack, irMap, tempVar)), (pc, opcode)) =>
-          val successors = opcodecfg.cfg.get(pc).diSuccessors.map(_.value)
-
-          val res = for {
-            stackWithJumpLocals <- {
-              if (jumpTargets.contains(pc)) {
-                if (!true /* ???*/ ) Left(???)
-                else Right(newStackJump(pc, irMap))
-              } else Right(inStack)
-            }
-            t <- convertOne(opcode, pc, stackWithJumpLocals, tempVar)
-            Conversion(irCode, outStack, newTempVarCount) = t
-            jumpSuccessors                                = successors.intersect(jumpTargets)
-            newIr                                         = dumpStackForJumps(jumpSuccessors, outStack) ++ irCode
-            _ <- Either.cond(
-              outStack == Nil || successors.forall(pc < _),
-              (),
-              s"Non empty stack backwards jump at $pc with succ $successors"
-            )
-            nextStack = if (successors.contains(pc + 1) && !jumpTargets.contains(pc + 1)) outStack else Nil
-          } yield StackStep(nextStack, irMap.updated(pc, StackFrame(inStack, opcode, newIr, outStack)), newTempVarCount)
-
-          res.leftMap(_ -> irMap)
-        case (Left(e), (_, _)) => Left(e)
+    def dumpStackMultiple(nodes: Set[code.graph.NodeT], stack: Stack, tempVar: TempVar): (Vector[SIR], TempVar) = {
+      val (saveFake, tempVarOut) = stack.foldLeft((Vector.empty[SIR], tempVar)) {
+        case ((acc, newTempVar), stackValue) => (acc :+ SIR.SetFakeLocal(newTempVar, stackValue), newTempVar.inc)
       }
-      .map(_.irMap)
+
+      val res = nodes.toVector.flatMap { node =>
+        val leaderPc = node.value.code.firstKey
+        stack.zipWithIndex.map {
+          case (e, idx) =>
+            SIR.SetStackLocal(idx, leaderPc, Expr.GetFakeLocal(new TempVar(tempVar.index + idx), e.tpe))
+        }.toVector
+      }
+
+      (saveFake ++ res, tempVarOut)
+    }
+
+    val BlockStep(sirBlocks, _, _) = sortedNodes.foldLeft(
+      BlockStep(Map.empty[code.graph.NodeT, CFG.SIRBlock], Map.empty[code.graph.NodeT, StackInfo], new TempVar(0))
+    ) {
+      case (BlockStep(accNodes, predecessorsInfo, blockTempVar), node) =>
+        val predecessors = node.diPredecessors
+        val successors   = node.diSuccessors
+        val opCodeBlock  = node.value
+        val leader       = opCodeBlock.code.firstKey
+
+        val predecessorInfo = predecessors.collectFirst(predecessorsInfo).getOrElse(StackInfo.Empty)
+        val startStack      = StackInfo.stackFromInfo(predecessorInfo, leader)
+
+        val eitherResult = opCodeBlock.code.foldLeft(
+          StackStep(startStack, LongMap.empty[StackFrame], blockTempVar)
+            .asRight[(String, CodeWithStack, TempVar)]
+        ) {
+          case (Right(StackStep(inStack, irMap, codeTempVar)), (pc, opcode)) =>
+            convertOne(opcode, pc, inStack, codeTempVar) match {
+              case Right(CodeStep(irCode, outStack, newTempVar)) =>
+                Right(
+                  StackStep(
+                    outStack,
+                    irMap.updated(pc, StackFrame(inStack, opcode, irCode, outStack)),
+                    newTempVar
+                  )
+                )
+              case Left(e) => Left((e, irMap, codeTempVar))
+            }
+          case (Left(e), (_, _)) => Left(e)
+        }
+
+        eitherResult match {
+          case Right(StackStep(stack, irMap, outTempVar)) =>
+            val baseCode = irMap.transform((_, f) => Vector(f.code))
+
+            val (code, finalTempVar) = if (successors.nonEmpty) {
+              val (dumpCode, outTempVarAfterDump) =
+                if (successors.sizeIs > 1)
+                  dumpStackMultiple(successors, stack, outTempVar)
+                else
+                  (dumpStackSingle(successors.head, stack), outTempVar)
+
+              //At this point it should only contain one element lists
+              val lastPc           = baseCode.lastKey
+              val lastCode         = baseCode(lastPc).head
+              val lastCodeWithDump = dumpCode :+ lastCode
+
+              (baseCode.updated(lastPc, lastCodeWithDump), outTempVarAfterDump)
+            } else {
+              (baseCode, outTempVar)
+            }
+
+            val sirBlock = CFG.SIRBlock.SIRCodeBasicBlock(code.to(TreeMap))
+            BlockStep(
+              accNodes.updated(node, Right(sirBlock)),
+              predecessorsInfo.updated(node, StackInfo.fromStack(stack)),
+              finalTempVar
+            )
+
+          case Left((error, code, outTempVar)) =>
+            BlockStep(
+              accNodes.updated(node, Left(CFG.SIRBlock.SIRErrorBlock(error, code))),
+              predecessorsInfo,
+              outTempVar
+            )
+        }
+    }
+
+    val newNodes = sirBlocks.values
+    val newEdges = code.graph.edges.map(edge => sirBlocks(edge.from) ~> sirBlocks(edge.to))
+
+    val newGraph = Graph.from(newNodes, newEdges)
+    CFG(newGraph, newGraph.get(sirBlocks(code.graph.get(code.start))))
   }
 
   private def convertOne(
@@ -85,7 +183,7 @@ object OPCodeToSIR {
       pc: Long,
       stack: Stack,
       tempVar: TempVar
-  ): Either[String, Conversion] = {
+  ): Either[String, CodeStep] = {
 
     implicit def opToIrType(tpe: OPType): IRType.Aux[tpe.A] = tpe match {
       case OPType.Boolean => IRType.Boolean.asInstanceOf[IRType.Aux[tpe.A]]
@@ -102,20 +200,20 @@ object OPCodeToSIR {
     }
 
     /** A simple conversion that just modifies the stack */
-    def nopSimple(newStack: Stack): Either[String, Conversion] =
-      Right(Conversion(Seq(SIR.Nop), newStack, tempVar))
+    def nopSimple(newStack: Stack): Either[String, CodeStep] =
+      Right(CodeStep(SIR.Nop, newStack, tempVar))
 
     /** A simple conversion that just modifies the stack, but can fail */
-    def nop(newStack: Either[String, Stack]): Either[String, Conversion] =
+    def nop(newStack: Either[String, Stack]): Either[String, CodeStep] =
       newStack.flatMap(nopSimple)
 
     /** A simple conversion that results in a new IR code, and a new stack */
-    def seqSimple(ir: SIR, newStack: Stack): Either[String, Conversion] =
-      Right(Conversion(Seq(ir), newStack, tempVar))
+    def irSimple(ir: SIR, newStack: Stack): Either[String, CodeStep] =
+      Right(CodeStep(ir, newStack, tempVar))
 
     /** A conversion that can fail that results in a new IR code, and a new stack */
-    def seq(res: Either[String, (SIR, Stack)]): Either[String, Conversion] =
-      res.map(t => Conversion(Seq(t._1), t._2, tempVar))
+    def ir(res: Either[String, (SIR, Stack)]): Either[String, CodeStep] =
+      res.map(t => CodeStep(t._1, t._2, tempVar))
 
     /** Is the expression type of type 2 */
     def isCat2Type(expr: Expr[_]): Boolean = IRType.Category2.isSupertypeOf(expr.tpe)
@@ -193,8 +291,8 @@ object OPCodeToSIR {
 
       case OPCode.VarLoad(tpe, index) =>
         Right(
-          Conversion(
-            Seq(SIR.GetLocal(tempVar, index)),
+          CodeStep(
+            SIR.GetLocal(tempVar, index),
             Expr.GetFakeLocal(tempVar, tpe) :: stack,
             tempVar.inc
           )
@@ -203,8 +301,8 @@ object OPCodeToSIR {
         val irTpe = opToIrType(tpe)
         stack11(IRType.Array(irTpe), IRType.Int) {
           case (e2, e1, r) =>
-            Conversion(
-              Seq(SIR.GetArray(tempVar, e1, e2)),
+            CodeStep(
+              SIR.GetArray(tempVar, e1, e2),
               Expr.GetFakeLocal(tempVar, irTpe) :: r,
               tempVar.inc
             )
@@ -213,11 +311,11 @@ object OPCodeToSIR {
         stack1(tpe) {
           case (_: Expr.UninitializedRef, _) => Left("Can't assign uninitialized reference to variable")
           case (e1, r) =>
-            Right(Conversion(Seq(SIR.SetLocal(index, e1)), r, tempVar))
+            Right(CodeStep(SIR.SetLocal(index, e1), r, tempVar))
         }.flatten
       case OPCode.ArrayStore(tpe) =>
         val irTpe = opToIrType(tpe)
-        seq(
+        ir(
           stack111(irTpe, IRType.Int, IRType.Array(irTpe)) {
             case (_, _, _: Expr.UninitializedRef, _) => Left("Can't assign uninitialized reference to array")
             case (e3, e2, e1, r2) =>
@@ -280,8 +378,8 @@ object OPCodeToSIR {
       case OPCode.Add(tpe)           => nop(stack2Add(tpe)(Expr.Add(_, _)))
       case OPCode.Sub(tpe)           => nop(stack2Add(tpe)(Expr.Sub(_, _)))
       case OPCode.Mult(tpe)          => nop(stack2Add(tpe)(Expr.Mult(_, _)))
-      case OPCode.Div(tpe)           => seq(stack2(tpe)((e1, e2, r) => (SIR.NotZero(e2), Expr.Div(e1, e2) :: r)))
-      case OPCode.Rem(tpe)           => seq(stack2(tpe)((e1, e2, r) => (SIR.NotZero(e2), Expr.Rem(e1, e2) :: r)))
+      case OPCode.Div(tpe)           => ir(stack2(tpe)((e1, e2, r) => (SIR.NotZero(e2), Expr.Div(e1, e2) :: r)))
+      case OPCode.Rem(tpe)           => ir(stack2(tpe)((e1, e2, r) => (SIR.NotZero(e2), Expr.Rem(e1, e2) :: r)))
       case OPCode.Neg(tpe)           => nop(stack1Add(tpe)(Expr.Neg(_)))
       case OPCode.ShiftLeft(tpe)     => nop(stack11Add(tpe, IRType.Int)((e2, e1) => Expr.ShiftLeft(e1, e2)))
       case OPCode.ShiftRight(tpe)    => nop(stack11Add(tpe, IRType.Int)((e2, e1) => Expr.ShiftRight(e1, e2)))
@@ -290,62 +388,49 @@ object OPCodeToSIR {
       case OPCode.Or(tpe)            => nop(stack2Add(tpe)(Expr.Or(_, _)))
       case OPCode.Xor(tpe)           => nop(stack2Add(tpe)(Expr.Xor(_, _)))
 
-      case OPCode.IntVarIncr(index, amount) =>
-        Right(
-          Conversion(
-            Seq(
-              SIR.GetLocal(tempVar, index),
-              SIR.SetLocal(
-                index,
-                Expr.Add(Expr.ConstTpe(IRType.Int, amount), Expr.GetFakeLocal(tempVar, IRType.Int))
-              )
-            ),
-            stack,
-            tempVar.inc
-          )
-        )
+      case OPCode.IntVarIncr(index, amount) => irSimple(SIR.IntVarIncr(index, amount), stack)
 
       case OPCode.Conversion(from, to) => nop(stack1Add(from)(Expr.Convert(_, opToIrType(to))))
 
       case OPCode.Compare(tpe, nanBehavior) => nop(stack2Add(tpe)(Expr.Compare(_, _, nanBehavior)))
 
       case OPCode.IntIfZero(cond, branchPC) =>
-        seq(
+        ir(
           stack1(IRType.Int)((e, r) => (SIR.If(condIntExpr(cond, e, Expr.ConstTpe(IRType.Int, 0)), branchPC), r))
         )
       case OPCode.IntIfCmp(cond, branchPC) =>
-        seq(stack2(IRType.Int)((e1, e2, r) => (SIR.If(condIntExpr(cond, e1, e2), branchPC), r)))
+        ir(stack2(IRType.Int)((e1, e2, r) => (SIR.If(condIntExpr(cond, e1, e2), branchPC), r)))
       case OPCode.RefIf(cond, branchPC) =>
-        seq(stack1(IRType.AnyRef)((e, r) => (SIR.If(condRefExpr(cond, e), branchPC), r)))
+        ir(stack1(IRType.AnyRef)((e, r) => (SIR.If(condRefExpr(cond, e), branchPC), r)))
       case OPCode.RefIfCmp(cond, branchPC) =>
-        seq(stack2(IRType.AnyRef)((e1, e2, r) => (SIR.If(condRefCmpExpr(cond, e1, e2), branchPC), r)))
-      case OPCode.Goto(branchPC) => seqSimple(SIR.Goto(branchPC), stack)
+        ir(stack2(IRType.AnyRef)((e1, e2, r) => (SIR.If(condRefCmpExpr(cond, e1, e2), branchPC), r)))
+      case OPCode.Goto(branchPC) => irSimple(SIR.Goto(branchPC), stack)
       case OPCode.Switch(defaultPC, pairs) =>
-        seq(stack1(IRType.Int)((e, r) => (SIR.Switch(e, defaultPC, pairs), r)))
+        ir(stack1(IRType.Int)((e, r) => (SIR.Switch(e, defaultPC, pairs), r)))
 
-      case OPCode.Return(Some(tpe)) => seq(stack1(tpe)((e, r) => (SIR.Return(Some(e)), r)))
-      case OPCode.Return(None)      => seqSimple(SIR.Return(None), stack)
+      case OPCode.Return(Some(tpe)) => ir(stack1(tpe)((e, r) => (SIR.Return(Some(e)), r)))
+      case OPCode.Return(None)      => irSimple(SIR.Return(None), stack)
 
       case OPCode.GetStatic(fieldRefInfo) =>
         Right(
-          Conversion(
-            Seq(SIR.GetStatic(tempVar, fieldRefInfo)),
+          CodeStep(
+            SIR.GetStatic(tempVar, fieldRefInfo),
             Expr.GetFakeLocal(tempVar, IRType.fromDescriptor(fieldRefInfo.nameAndType.descriptor)) :: stack,
             tempVar.inc
           )
         )
       case OPCode.PutStatic(fieldRefInfo) =>
-        seq(stack1(IRType.Any)((e, r) => (SIR.SetStatic(fieldRefInfo, e), r)))
+        ir(stack1(IRType.Any)((e, r) => (SIR.SetStatic(fieldRefInfo, e), r)))
       case OPCode.GetField(fieldRefInfo) =>
         stack1(IRType.AnyRef)((e, r) =>
-          Conversion(
-            Seq(SIR.GetField(tempVar, e, fieldRefInfo)),
+          CodeStep(
+            SIR.GetField(tempVar, e, fieldRefInfo),
             Expr.GetFakeLocal(tempVar, IRType.fromDescriptor(fieldRefInfo.nameAndType.descriptor)) :: r,
             tempVar.inc
           )
         )
       case OPCode.PutField(fieldRefInfo) =>
-        seq(stack2(IRType.AnyRef)((ep, e, r) => (SIR.SetField(e, ep, fieldRefInfo), r)))
+        ir(stack2(IRType.AnyRef)((ep, e, r) => (SIR.SetField(e, ep, fieldRefInfo), r)))
 
       case invoke @ OPCode.Invoke(_, _) =>
         handleInvoke(invoke, stack, tempVar, pc)
@@ -353,20 +438,20 @@ object OPCodeToSIR {
       case OPCode.INVOKEDYNAMIC(indexByte1, indexByte2) => ???
 
       case OPCode.New(classInfo) =>
-        seqSimple(SIR.MaybeInit(classInfo), Expr.UninitializedRef(pc, classInfo) :: stack)
+        irSimple(SIR.MaybeInit(classInfo), Expr.UninitializedRef(pc, classInfo) :: stack)
 
       case OPCode.NewArray(tpe) =>
         stack1(IRType.Int) { (e, r) =>
-          Conversion(
-            Seq(SIR.NewArray(tempVar, e, opToIrType(tpe))),
+          CodeStep(
+            SIR.NewArray(tempVar, e, opToIrType(tpe)),
             Expr.GetFakeLocal(tempVar, IRType.Array(opToIrType(tpe))) :: r,
             tempVar.inc
           )
         }
       case OPCode.RefNewArray(classInfo) =>
         stack1(IRType.Int) { (e, r) =>
-          Conversion(
-            Seq(SIR.NewArray(tempVar, e, IRType.Ref(classInfo))),
+          CodeStep(
+            SIR.NewArray(tempVar, e, IRType.Ref(classInfo)),
             Expr.GetFakeLocal(tempVar, IRType.Array(IRType.Ref(classInfo))) :: r,
             tempVar.inc
           )
@@ -388,8 +473,8 @@ object OPCodeToSIR {
                 .asInstanceOf[IRType.Aux[Array[_]]]
 
             Right(
-              Conversion(
-                Seq(SIR.NewMultiArray(tempVar, tpe, sizesExpr)),
+              CodeStep(
+                SIR.NewMultiArray(tempVar, tpe, sizesExpr),
                 Expr.GetFakeLocal(tempVar, tpe) :: newStack,
                 tempVar.inc
               )
@@ -401,19 +486,19 @@ object OPCodeToSIR {
       case OPCode.RefThrow => nopSimple(stack) //TODO
       case OPCode.Cast(classInfo) =>
         stack1(IRType.AnyRef)((e, r) =>
-          Conversion(
-            Seq(SIR.Cast(tempVar, e, IRType.Ref(classInfo))),
+          CodeStep(
+            SIR.Cast(tempVar, e, IRType.Ref(classInfo)),
             Expr.GetFakeLocal(tempVar, IRType.Ref(classInfo)) :: r,
             tempVar.inc
           )
         )
       case OPCode.InstanceOf(classInfo) => nop(stack1Add(IRType.AnyRef)(Expr.IsInstanceOf(_, classInfo)))
-      case OPCode.MonitorEnter          => seq(stack1(IRType.AnyRef)((e, r) => (SIR.MonitorEnter(e), r)))
-      case OPCode.MonitorExit           => seq(stack1(IRType.AnyRef)((e, r) => (SIR.MonitorExit(e), r)))
+      case OPCode.MonitorEnter          => ir(stack1(IRType.AnyRef)((e, r) => (SIR.MonitorEnter(e), r)))
+      case OPCode.MonitorExit           => ir(stack1(IRType.AnyRef)((e, r) => (SIR.MonitorExit(e), r)))
     }
   }
 
-  def handleInvoke(invoke: OPCode.Invoke, stack: Stack, tempVar: TempVar, pc: Long): Either[String, Conversion] = {
+  def handleInvoke(invoke: OPCode.Invoke, stack: Stack, tempVar: TempVar, pc: Long): Either[String, CodeStep] = {
     val nameAndType = invoke.methodRefInfo.nameAndType
     val descriptor  = nameAndType.descriptor
     val mdesc = descriptor match {
@@ -443,7 +528,7 @@ object OPCodeToSIR {
     }
   }
 
-  def handleInit(params: Stack, stack: Stack, tempVar: TempVar, pc: Long): Either[String, Conversion] = {
+  def handleInit(params: Stack, stack: Stack, tempVar: TempVar, pc: Long): Either[String, CodeStep] = {
     val paramsInit = params.init
     val paramsLast = params.last
     val paramsVec = paramsInit.toVector.collect {
@@ -454,14 +539,14 @@ object OPCodeToSIR {
       paramsLast match {
         case uninit @ Expr.UninitializedRef(atAddress, classInfo) =>
           Right(
-            Conversion(
-              Seq(SIR.New(tempVar, classInfo, paramsVec)),
+            CodeStep(
+              SIR.New(tempVar, classInfo, paramsVec),
               stack.map(_.substitute(uninit, Expr.GetFakeLocal(tempVar, IRType.Ref(classInfo)))),
               tempVar.inc
             )
           )
         case expr =>
-          Right(Conversion(Seq(SIR.CallSuper(expr, paramsVec)), stack, tempVar))
+          Right(CodeStep(SIR.CallSuper(expr, paramsVec), stack, tempVar))
       }
     } else Left(s"Found uninitialized reference in object creation call at $pc")
   }
@@ -474,30 +559,28 @@ object OPCodeToSIR {
       callType: SIR.CallType,
       tempVar: TempVar,
       pc: Long
-  ): Either[String, Conversion] = {
+  ): Either[String, CodeStep] = {
     val paramsVec = params.toVector.reverse.collect {
       case e: Expr[_] if !e.isInstanceOf[Expr.UninitializedRef] => e
     }
     val methodName = methodInfo.nameAndType.name
 
     if (params.lengthIs == paramsVec.length) {
-      val call = Seq(
-        SIR.Call(
-          tempVar,
-          callType,
-          methodInfo.clazz,
-          methodName,
-          desc,
-          if (callType == SIR.CallType.Static) None else Some(paramsVec.head),
-          paramsVec.tail
-        )
+      val call = SIR.Call(
+        tempVar,
+        callType,
+        methodInfo.clazz,
+        methodName,
+        desc,
+        if (callType == SIR.CallType.Static) None else Some(paramsVec.head),
+        paramsVec.tail
       )
 
       desc.returnType match {
-        case Descriptor.VoidType => Right(Conversion(call, stack, tempVar.inc))
+        case Descriptor.VoidType => Right(CodeStep(call, stack, tempVar.inc))
         case returnType: Descriptor.FieldType =>
           Right(
-            Conversion(
+            CodeStep(
               call,
               Expr.GetFakeLocal(tempVar, IRType.fromDescriptor(returnType)) :: stack,
               tempVar.inc
