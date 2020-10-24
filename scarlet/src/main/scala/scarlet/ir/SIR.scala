@@ -37,6 +37,8 @@ object SIR {
 
   class TempVar(val index: Int) extends AnyVal {
     def inc: TempVar = new TempVar(index + 1)
+
+    override def toString: String = index.toString
   }
 
   /**
@@ -630,52 +632,69 @@ object SIR {
 
   case class SyntaxExtra(methodParams: Option[MethodParameters])
 
-  def toSyntax(sir: SIR)(implicit syntaxExtra: SyntaxExtra): Seq[String] = sir match {
-    case Nop              => Nil
-    case MaybeInit(clazz) => Seq(s"${clazz.name}.<clinit>")
-    case NotZero(expr)    => Seq(s"notZero(${expr.toSyntax})")
-    case SetLocal(index, e) =>
-      Seq(syntaxExtra.methodParams.flatMap(_.parameters.lift(index - 1)).flatMap(_.name) match {
-        case Some(name) => s"var $name = ${e.toSyntax}"
-        case None       => s"var var_$index = ${e.toSyntax}"
-      })
-    case SetStackLocal(index, pc, e) => Seq(s"var stack_${index}_$pc = ${e.toSyntax}")
-    case SetArray(arr, idx, obj)     => Seq(s"${arr.toSyntax}[${idx.toSyntax}] = ${obj.toSyntax}")
-    case SetField(e, f, fieldRefInfo) =>
-      Seq(s"${e.toSyntax}.${fieldRefInfo.nameAndType.name} = (${f.toSyntax})")
-    case SetStatic(fieldRefInfo, e) =>
-      Seq(s"${fieldRefInfo.clazz.name}.${fieldRefInfo.nameAndType.name} = ${e.toSyntax}")
-    case New(varIndex, clazz, variables) =>
-      Seq(s"var local_$varIndex = new ${clazz.name}(${variables.map(_.toSyntax).mkString(", ")})")
-    case CallSuper(e, variables) =>
-      Seq(s"${e.toSyntax}.super(${variables.map(_.toSyntax).mkString(", ")})")
-    case Call(varIndex, _, clazz, name, _, None, variables) =>
-      Seq(s"var local_$varIndex = ${clazz.name}.$name(${variables.map(_.toSyntax).mkString(", ")})")
-    case Call(varIndex, _, _, name, _, Some(obj), variables) =>
-      Seq(s"var local_$varIndex = ${obj.toSyntax}.$name(${variables.map(_.toSyntax).mkString(", ")})")
-    case NewArray(varIndex, size, arrTpe) =>
-      Seq(s"var local_$varIndex = new ${arrTpe.describe}[${size.toSyntax}]")
-    case NewMultiArray(varIndex, tpe, sizesExpr) =>
-      @tailrec
-      def underlyingTpe(tpe: Type.Aux[_]): Type = tpe match {
-        case Type.Array(inner) => underlyingTpe(inner)
-        case _                 => tpe
-      }
+  def toSyntax(sir: SIR)(implicit syntaxExtra: SyntaxExtra): Seq[String] = {
+    sir match {
+      case Nop              => Nil
+      case MaybeInit(clazz) => Seq(s"classOf[${clazz.name}]")
+      case NotZero(expr)    => Seq(s"notZero(${expr.toSyntax})")
+      case GetLocal(tempVar, index) =>
+        Seq(syntaxExtra.methodParams.flatMap(_.parameters.lift(index - 1)).flatMap(_.name) match {
+          case Some(name) => s"var local_${tempVar.index} = $name"
+          case None       => s"var local_${tempVar.index} = var_$index"
+        })
+      case SetLocal(index, e) =>
+        Seq(syntaxExtra.methodParams.flatMap(_.parameters.lift(index - 1)).flatMap(_.name) match {
+          case Some(name) => s"var $name = ${e.toSyntax}"
+          case None       => s"var var_$index = ${e.toSyntax}"
+        })
+      case IntVarIncr(index, amount) =>
+        Seq(syntaxExtra.methodParams.flatMap(_.parameters.lift(index - 1)).flatMap(_.name) match {
+          case Some(name) => s"var $name = $name + $amount"
+          case None       => s"var var_$index = var_$index + $amount"
+        })
+      case SetFakeLocal(tempVar, e)    => Seq(s"var local_${tempVar.index} = ${e.toSyntax}")
+      case SetStackLocal(index, pc, e) => Seq(s"var stack_${index}_$pc = ${e.toSyntax}")
+      case GetArray(tempVar, arr, idx) => Seq(s"var local_${tempVar.index} = ${arr.toSyntax}[${idx.toSyntax}]")
+      case SetArray(arr, idx, obj)     => Seq(s"${arr.toSyntax}[${idx.toSyntax}] = ${obj.toSyntax}")
+      case GetField(tempVar, e, fieldRefInfo) =>
+        Seq(s"var local_${tempVar.index} = ${e.toSyntax}.${fieldRefInfo.nameAndType.name}")
+      case SetField(e, f, fieldRefInfo) => Seq(s"${e.toSyntax}.${fieldRefInfo.nameAndType.name} = (${f.toSyntax})")
+      case GetStatic(tempVar, fieldRefInfo) =>
+        Seq(s"var local_${tempVar.index} = ${fieldRefInfo.clazz.name}.${fieldRefInfo.nameAndType.name}")
+      case SetStatic(fieldRefInfo, e) =>
+        Seq(s"${fieldRefInfo.clazz.name}.${fieldRefInfo.nameAndType.name} = ${e.toSyntax}")
+      case New(tempVar, clazz, variables) =>
+        Seq(s"var local_${tempVar.index} = new ${clazz.name}(${variables.map(_.toSyntax).mkString(", ")})")
+      case CallSuper(e, variables) => Seq(s"${e.toSyntax}.super(${variables.map(_.toSyntax).mkString(", ")})")
+      case Call(tempVar, _, clazz, name, _, None, variables) =>
+        Seq(s"var local_${tempVar.index} = ${clazz.name}.$name(${variables.map(_.toSyntax).mkString(", ")})")
+      case Call(tempVar, _, _, name, _, Some(obj), variables) =>
+        Seq(s"var local_${tempVar.index} = ${obj.toSyntax}.$name(${variables.map(_.toSyntax).mkString(", ")})")
+      case NewArray(tempVar, size, arrTpe) =>
+        Seq(s"var local_${tempVar.index} = new ${arrTpe.describe}[${size.toSyntax}]")
+      case NewMultiArray(tempVar, tpe, sizesExpr) =>
+        @tailrec
+        def underlyingTpe(tpe: Type.Aux[_]): Type = tpe match {
+          case Type.Array(inner) => underlyingTpe(inner)
+          case _                 => tpe
+        }
 
-      val dimensionsBrackets = sizesExpr.map(e => s"[${e.toSyntax}]").mkString
+        val dimensionsBrackets = sizesExpr.map(e => s"[${e.toSyntax}]").mkString
 
-      Seq(s"var local_$varIndex = new ${underlyingTpe(tpe).describe}$dimensionsBrackets")
-    case If(expr, branchPC) => Seq(s"if(${expr.toSyntax}) goto $branchPC")
-    case Switch(expr, defaultPC, pairs) =>
-      val gotos = pairs.map {
-        case (offset, pc) => s"case $offset: goto $pc"
-      }
+        Seq(s"var local_${tempVar.index} = new ${underlyingTpe(tpe).describe}$dimensionsBrackets")
+      case If(expr, branchPC) => Seq(s"if(${expr.toSyntax}) goto $branchPC")
+      case Switch(expr, defaultPC, pairs) =>
+        val gotos = pairs.map {
+          case (offset, pc) => s"case $offset: goto $pc"
+        }
 
-      s"switch(${expr.toSyntax}) {" +: gotos :+ s"default: goto $defaultPC" :+ "}"
-    case Goto(branchPC)     => Seq(s"goto $branchPC")
-    case Return(Some(expr)) => Seq(s"return ${expr.toSyntax}")
-    case Return(None)       => Seq("return")
-    case MonitorEnter(e)    => Seq(s"${e.toSyntax}.synchronizedStart")
-    case MonitorExit(e)     => Seq(s"${e.toSyntax}.synchronizedEnd")
+        s"switch(${expr.toSyntax}) {" +: gotos :+ s"default: goto $defaultPC" :+ "}"
+      case Goto(branchPC)       => Seq(s"goto $branchPC")
+      case Return(Some(expr))   => Seq(s"return ${expr.toSyntax}")
+      case Return(None)         => Seq("return")
+      case MonitorEnter(e)      => Seq(s"${e.toSyntax}.synchronizedStart")
+      case MonitorExit(e)       => Seq(s"${e.toSyntax}.synchronizedEnd")
+      case Cast(tempVar, e, to) => Seq(s"var local_${tempVar.index} = ${e.toSyntax}.asInstanceOf[${to.describe}]")
+    }
   }
 }

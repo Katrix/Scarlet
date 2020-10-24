@@ -3,6 +3,7 @@ package scarlet.graph
 import scalax.collection.Graph
 import scalax.collection.GraphEdge.DiEdge
 import scalax.collection.GraphPredef._
+import scarlet.Scarlet
 import scarlet.classfile.denormalized.opcodes.OPCode
 import scarlet.classfile.denormalized.opcodes.OPCode._
 import scarlet.ir.OPCodeToSIR.CodeWithStack
@@ -19,7 +20,7 @@ object CFG {
   sealed trait SIRBlock
   object SIRBlock {
     case class SIRCodeBasicBlock(code: TreeMap[Long, Vector[SIR]])                extends SIRBlock
-    case class SIRErrorBlock(error: String, codeWithStack: CodeWithStack) extends SIRBlock
+    case class SIRErrorBlock(pc: Long, error: String, op: OPCode, codeWithStack: CodeWithStack) extends SIRBlock
   }
 
   private object Last {
@@ -83,8 +84,8 @@ object CFG {
     } yield (b1, b2)
 
     val edges = basicBlockProduct.flatMap {
-      case (b1 @ OPCodeBasicBlock(Last((b1Addr, b1Op))), b2 @ OPCodeBasicBlock(First((b2Addr, _))))
-          if (b1Addr - (b1Addr % 1000)) + 1000 == b2Addr && !isUnconditionalBranch(b1Op) =>
+      case (b1 @ OPCodeBasicBlock(Last((pc1, b1Op))), b2 @ OPCodeBasicBlock(First((pc2, _))))
+          if pc1 + 1 == pc2 && !isUnconditionalBranch(b1Op) =>
         Seq(b1 ~> b2)
       case (b1 @ OPCodeBasicBlock(Last((_, b1Op))), b2 @ OPCodeBasicBlock(First((b2Addr, _))))
           if branchesFrom(b1Op).contains(b2Addr) =>
@@ -97,8 +98,8 @@ object CFG {
 
     if (!graph.isConnected) {
       val otherComponents = graph.componentTraverser().withSubgraph(nodes = _.value != start).toVector
-      pprint.pprintln(s"Found unreachable code")
-      pprint.pprintln(otherComponents)
+      Scarlet.printer.pprintln(s"Found unreachable code")
+      Scarlet.printer.pprintln(otherComponents)
     }
 
     CFG(graph, start)

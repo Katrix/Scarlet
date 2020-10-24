@@ -1,6 +1,5 @@
 package scarlet.ir
 
-import scalax.collection.edge.LDiEdge
 import scarlet.classfile.denormalized.Descriptor
 import scarlet.classfile.denormalized.opcodes.OPCode
 import scarlet.classfile.denormalized.opcodes.OPCode.{MethodInfo, Type => OPType}
@@ -8,7 +7,7 @@ import scarlet.graph.CFG
 import scarlet.ir.SIR.{Expr, TempVar, Type => IRType}
 
 import scala.collection.immutable.{LongMap, TreeMap}
-import scala.language.{existentials, implicitConversions}
+import scala.language.implicitConversions
 
 /**
   * A converter from denormalized opcodes to [[SIR]].
@@ -35,7 +34,7 @@ object OPCodeToSIR {
 
     def stackFromInfo(info: StackInfo, jumpTarget: Long): Stack = info.types.zipWithIndex.map {
       case (tpe, idx) =>
-        Expr.GetStackLocal(idx, jumpTarget, tpe)
+        Expr.GetStackLocal(idx, jumpTarget, tpe.asInstanceOf[SIR.Type.Aux[_]])
     }
 
     def fromStack(stack: Stack): StackInfo = StackInfo(stack.map(_.tpe))
@@ -45,11 +44,14 @@ object OPCodeToSIR {
     import cats.syntax.all._
     import scalax.collection.GraphPredef._
     import scalax.collection.edge.Implicits._
+    import scalax.collection.edge.LBase.LEdgeImplicits
     import scalax.collection.immutable.Graph
+    object TupleLabelImplicit extends LEdgeImplicits[(code.graph.NodeT, code.graph.NodeT)]
+    import TupleLabelImplicit._
 
     val strongComponents = code.graph.strongComponentTraverser().toVector
 
-    val sortedNodes = if (strongComponents.length > 1) {
+    val sortedNodes: Vector[code.graph.NodeT] = if (strongComponents.length > 1) {
       val sccEdges = for {
         c1 <- strongComponents
         c2 <- strongComponents
@@ -59,7 +61,7 @@ object OPCodeToSIR {
         if code.graph.contains(n1.value ~> n2.value)
       } yield (c1 ~+> c2)((n1, n2))
 
-      val scc: Graph[code.graph.Component, Lambda[A => LDiEdge[A] { type L1 = (code.graph.NodeT, code.graph.NodeT) }]] =
+      val scc =
         Graph(sccEdges: _*)
       scc.topologicalSortByComponent.toVector
         .flatMap(_.getOrElse(sys.error("impossible")).toVector)
@@ -72,7 +74,7 @@ object OPCodeToSIR {
             val startNode =
               sccNode.incoming.headOption.map(_.label._2).map(n => subgraph.get(n.value)).getOrElse(subgraph.nodes.head)
 
-            subgraph.innerNodeTraverser(startNode).toVector
+            subgraph.innerNodeTraverser(startNode).toVector.map(subgraphNode => code.graph.get(subgraphNode.value))
           }
         }
     } else {
@@ -112,12 +114,12 @@ object OPCodeToSIR {
         val opCodeBlock  = node.value
         val leader       = opCodeBlock.code.firstKey
 
-        val predecessorInfo = predecessors.collectFirst(predecessorsInfo).getOrElse(StackInfo.Empty)
+        val predecessorInfo = predecessors.collectFirst[StackInfo](predecessorsInfo).getOrElse(StackInfo.Empty)
         val startStack      = StackInfo.stackFromInfo(predecessorInfo, leader)
 
         val eitherResult = opCodeBlock.code.foldLeft(
           StackStep(startStack, LongMap.empty[StackFrame], blockTempVar)
-            .asRight[(String, CodeWithStack, TempVar)]
+            .asRight[(Long, String, OPCode, CodeWithStack, TempVar)]
         ) {
           case (Right(StackStep(inStack, irMap, codeTempVar)), (pc, opcode)) =>
             convertOne(opcode, pc, inStack, codeTempVar) match {
@@ -129,7 +131,7 @@ object OPCodeToSIR {
                     newTempVar
                   )
                 )
-              case Left(e) => Left((e, irMap, codeTempVar))
+              case Left(e) => Left((pc, e, opcode, irMap, codeTempVar))
             }
           case (Left(e), (_, _)) => Left(e)
         }
@@ -157,14 +159,14 @@ object OPCodeToSIR {
 
             val sirBlock = CFG.SIRBlock.SIRCodeBasicBlock(code.to(TreeMap))
             BlockStep(
-              accNodes.updated(node, Right(sirBlock)),
+              accNodes.updated(node, sirBlock),
               predecessorsInfo.updated(node, StackInfo.fromStack(stack)),
               finalTempVar
             )
 
-          case Left((error, code, outTempVar)) =>
+          case Left((pc, error, op, code, outTempVar)) =>
             BlockStep(
-              accNodes.updated(node, Left(CFG.SIRBlock.SIRErrorBlock(error, code))),
+              accNodes.updated(node, CFG.SIRBlock.SIRErrorBlock(pc, error, op, code)),
               predecessorsInfo,
               outTempVar
             )
@@ -308,7 +310,7 @@ object OPCodeToSIR {
             )
         }
       case OPCode.VarStore(tpe, index) =>
-        stack1(tpe) {
+        stack1(opToIrType(tpe).asInstanceOf[IRType.Aux[AnyRef]]) {
           case (_: Expr.UninitializedRef, _) => Left("Can't assign uninitialized reference to variable")
           case (e1, r) =>
             Right(CodeStep(SIR.SetLocal(index, e1), r, tempVar))
@@ -316,7 +318,7 @@ object OPCodeToSIR {
       case OPCode.ArrayStore(tpe) =>
         val irTpe = opToIrType(tpe)
         ir(
-          stack111(irTpe, IRType.Int, IRType.Array(irTpe)) {
+          stack111(irTpe.asInstanceOf[IRType.Aux[AnyRef]], IRType.Int, IRType.Array(irTpe.asInstanceOf[IRType.Aux[AnyRef]])) {
             case (_, _, _: Expr.UninitializedRef, _) => Left("Can't assign uninitialized reference to array")
             case (e3, e2, e1, r2) =>
               Right((SIR.SetArray(e3, e2, e1), r2))
