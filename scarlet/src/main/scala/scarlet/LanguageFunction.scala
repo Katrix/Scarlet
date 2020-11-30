@@ -204,7 +204,11 @@ object LanguageFunction {
     override def process(
         in: ClassfileWithData[Unit, Unit, LongMap[NEL[String]], LongMap[DeOPCode]]
     ): EitherNel[String, ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.OPCodeBasicBlock]]] =
-      Right(in.rightmapMethod(opCode => CFG.createFromOPCode(opCode)))
+      Right(
+        in.rightmapMethodWithMethod((method, opCode) =>
+          CFG.createFromOPCode(opCode, method.attributes.collectFirst { case code: Code => code })
+        )
+      )
 
     override def print(out: ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.OPCodeBasicBlock]]): Str = {
       val dotOut = out

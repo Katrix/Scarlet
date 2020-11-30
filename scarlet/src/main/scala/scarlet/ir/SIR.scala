@@ -629,6 +629,13 @@ object SIR {
     override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
       Cast(tempVar, f(e), to)
   }
+  case class Throw(e: Expr[_]) extends SIR {
+    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
+      Throw(e.substitute(target, newExpr))
+
+    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
+      Throw(f(e))
+  }
 
   case class SyntaxExtra(methodParams: Option[MethodParameters])
 
@@ -695,6 +702,7 @@ object SIR {
       case MonitorEnter(e)      => Seq(s"${e.toSyntax}.synchronizedStart")
       case MonitorExit(e)       => Seq(s"${e.toSyntax}.synchronizedEnd")
       case Cast(tempVar, e, to) => Seq(s"var local_${tempVar.index} = ${e.toSyntax}.asInstanceOf[${to.describe}]")
+      case Throw(e)             => Seq(s"throw ${e.toSyntax}")
     }
   }
 }

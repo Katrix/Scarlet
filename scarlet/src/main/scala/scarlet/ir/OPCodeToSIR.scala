@@ -32,6 +32,13 @@ object OPCodeToSIR {
   object StackInfo {
     val Empty: StackInfo = StackInfo(Nil)
 
+    //TODO: Handle exceptions
+    // From the JVMS:
+    // In the special case of control transfer to an exception handler,
+    // the operand stack is set to contain a single object of the exception type
+    // indicated by the exception handler information. There must be sufficient
+    // room on the operand stack for this single value,
+    // as if an instruction had pushed it.
     def stackFromInfo(info: StackInfo, jumpTarget: Long): Stack = info.types.zipWithIndex.map {
       case (tpe, idx) =>
         Expr.GetStackLocal(idx, jumpTarget, tpe.asInstanceOf[SIR.Type.Aux[_]])
@@ -61,8 +68,7 @@ object OPCodeToSIR {
         if code.graph.contains(n1.value ~> n2.value)
       } yield (c1 ~+> c2)((n1, n2))
 
-      val scc =
-        Graph(sccEdges: _*)
+      val scc = Graph.from(strongComponents, sccEdges)
       scc.topologicalSortByComponent.toVector
         .flatMap(_.getOrElse(sys.error("impossible")).toVector)
         .distinct
@@ -70,9 +76,9 @@ object OPCodeToSIR {
           if (sccNode.value.nodes.size == 1) {
             Seq(sccNode.value.nodes.head)
           } else {
-            val subgraph = sccNode.value.to(Graph)
-            val startNode =
-              sccNode.incoming.headOption.map(_.label._2).map(n => subgraph.get(n.value)).getOrElse(subgraph.nodes.head)
+            val subgraph     = sccNode.value.to(Graph)
+            val earliestNode = sccNode.incoming.minByOption(_.label._2.value.leader)
+            val startNode    = earliestNode.map(_.label._2).map(n => subgraph.get(n.value)).getOrElse(subgraph.nodes.head)
 
             subgraph.innerNodeTraverser(startNode).toVector.map(subgraphNode => code.graph.get(subgraphNode.value))
           }
@@ -82,7 +88,7 @@ object OPCodeToSIR {
     }
 
     def dumpStackSingle(node: code.graph.NodeT, stack: Stack): Vector[SIR] = {
-      val leaderPc = node.value.code.firstKey
+      val leaderPc = node.value.leader
       stack.zipWithIndex.map {
         case (e, idx) =>
           SIR.SetStackLocal(idx, leaderPc, e)
@@ -95,7 +101,7 @@ object OPCodeToSIR {
       }
 
       val res = nodes.toVector.flatMap { node =>
-        val leaderPc = node.value.code.firstKey
+        val leaderPc = node.value.leader
         stack.zipWithIndex.map {
           case (e, idx) =>
             SIR.SetStackLocal(idx, leaderPc, Expr.GetFakeLocal(new TempVar(tempVar.index + idx), e.tpe))
@@ -112,7 +118,7 @@ object OPCodeToSIR {
         val predecessors = node.diPredecessors
         val successors   = node.diSuccessors
         val opCodeBlock  = node.value
-        val leader       = opCodeBlock.code.firstKey
+        val leader       = opCodeBlock.leader
 
         val predecessorInfo = predecessors.collectFirst[StackInfo](predecessorsInfo).getOrElse(StackInfo.Empty)
         val startStack      = StackInfo.stackFromInfo(predecessorInfo, leader)
@@ -318,7 +324,11 @@ object OPCodeToSIR {
       case OPCode.ArrayStore(tpe) =>
         val irTpe = opToIrType(tpe)
         ir(
-          stack111(irTpe.asInstanceOf[IRType.Aux[AnyRef]], IRType.Int, IRType.Array(irTpe.asInstanceOf[IRType.Aux[AnyRef]])) {
+          stack111(
+            irTpe.asInstanceOf[IRType.Aux[AnyRef]],
+            IRType.Int,
+            IRType.Array(irTpe.asInstanceOf[IRType.Aux[AnyRef]])
+          ) {
             case (_, _, _: Expr.UninitializedRef, _) => Left("Can't assign uninitialized reference to array")
             case (e3, e2, e1, r2) =>
               Right((SIR.SetArray(e3, e2, e1), r2))
@@ -485,7 +495,8 @@ object OPCodeToSIR {
         } else Left(s"Not enough stack params for multi array initialization at $pc")
       case OPCode.ArrayLength => nop(stack1Add(IRType.AnyArray)(Expr.ArrayLength))
 
-      case OPCode.RefThrow => nopSimple(stack) //TODO
+      case OPCode.RefThrow => ir(stack1(IRType.AnyRef)((e, r) => (SIR.Throw(e), r)))
+
       case OPCode.Cast(classInfo) =>
         stack1(IRType.AnyRef)((e, r) =>
           CodeStep(
