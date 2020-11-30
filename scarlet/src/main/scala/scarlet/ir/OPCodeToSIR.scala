@@ -271,24 +271,31 @@ object OPCodeToSIR {
     def stack2Add(tpe: IRType)(use: (Expr[tpe.A], Expr[tpe.A]) => Expr[_]): Either[String, Stack] =
       stack2(tpe)(use(_, _) :: _)
 
-    def condIntExpr(cond: OPCode.IntIfCond, e1: Expr[Int], e2: Expr[Int]): Expr[Boolean] = cond match {
-      case OPCode.IntIfCond.EQ => Expr.Eq(e1, e2)
-      case OPCode.IntIfCond.NE => Expr.Not(Expr.Eq(e1, e2))
-      case OPCode.IntIfCond.LT => Expr.LT(e1, e2)
-      case OPCode.IntIfCond.GE => Expr.GE(e1, e2)
-      case OPCode.IntIfCond.GT => Expr.GT(e1, e2)
-      case OPCode.IntIfCond.LE => Expr.LE(e1, e2)
+    def condIntExpr(cond: OPCode.IntIfCond, e1: Expr[Int], e2: Expr[Int]): Expr[Boolean] = {
+      val opType = cond match {
+        case OPCode.IntIfCond.EQ => SIR.BinaryOp.Equal
+        case OPCode.IntIfCond.NE => SIR.BinaryOp.NotEqual
+        case OPCode.IntIfCond.LT => SIR.BinaryOp.LT
+        case OPCode.IntIfCond.GE => SIR.BinaryOp.GE
+        case OPCode.IntIfCond.GT => SIR.BinaryOp.GT
+        case OPCode.IntIfCond.LE => SIR.BinaryOp.LE
+      }
+      Expr.BinaryExpr(e1, e2, opType, IRType.Boolean)
     }
 
-    def condRefCmpExpr(cond: OPCode.RefIfCmpCond, e1: Expr[AnyRef], e2: Expr[AnyRef]): Expr[Boolean] = cond match {
-      case OPCode.RefIfCmpCond.EQ => Expr.Eq(e1, e2)
-      case OPCode.RefIfCmpCond.NE => Expr.Not(Expr.Eq(e1, e2))
+    def condRefCmpExpr(cond: OPCode.RefIfCmpCond, e1: Expr[AnyRef], e2: Expr[AnyRef]): Expr[Boolean] = {
+      val opType = cond match {
+        case OPCode.RefIfCmpCond.EQ => SIR.BinaryOp.Equal
+        case OPCode.RefIfCmpCond.NE => SIR.BinaryOp.NotEqual
+      }
+      Expr.BinaryExpr(e1, e2, opType, IRType.Boolean)
     }
 
-    def condRefExpr(cond: OPCode.RefIfCond, e: Expr[AnyRef]): Expr[Boolean] = cond match {
-      case OPCode.RefIfCond.IsNull    => Expr.Eq(e, Expr.Null)
-      case OPCode.RefIfCond.IsNotNull => Expr.Not(Expr.Eq(e, Expr.Null))
-    }
+    def condRefExpr(cond: OPCode.RefIfCond, e: Expr[AnyRef]): Expr[Boolean] =
+      cond match {
+        case OPCode.RefIfCond.IsNull    => Expr.BinaryExpr(e, Expr.Null, SIR.BinaryOp.Equal, IRType.Boolean)
+        case OPCode.RefIfCond.IsNotNull => Expr.BinaryExpr(e, Expr.Null, SIR.BinaryOp.NotEqual, IRType.Boolean)
+      }
 
     //I don't think we need to store the old values for stuff as pointed out in the paper. Let's see what happens
     opCode match {
@@ -387,24 +394,41 @@ object OPCodeToSIR {
 
       case OPCode.Swap => nop(stack2(IRType.Category1)((e1, e2, r) => e2 :: e1 :: r))
 
-      case OPCode.Add(tpe)           => nop(stack2Add(tpe)(Expr.Add(_, _)))
-      case OPCode.Sub(tpe)           => nop(stack2Add(tpe)(Expr.Sub(_, _)))
-      case OPCode.Mult(tpe)          => nop(stack2Add(tpe)(Expr.Mult(_, _)))
-      case OPCode.Div(tpe)           => ir(stack2(tpe)((e1, e2, r) => (SIR.NotZero(e2), Expr.Div(e1, e2) :: r)))
-      case OPCode.Rem(tpe)           => ir(stack2(tpe)((e1, e2, r) => (SIR.NotZero(e2), Expr.Rem(e1, e2) :: r)))
-      case OPCode.Neg(tpe)           => nop(stack1Add(tpe)(Expr.Neg(_)))
-      case OPCode.ShiftLeft(tpe)     => nop(stack11Add(tpe, IRType.Int)((e2, e1) => Expr.ShiftLeft(e1, e2)))
-      case OPCode.ShiftRight(tpe)    => nop(stack11Add(tpe, IRType.Int)((e2, e1) => Expr.ShiftRight(e1, e2)))
-      case OPCode.LogShiftRight(tpe) => nop(stack11Add(tpe, IRType.Int)((e2, e1) => Expr.LogShiftRight(e1, e2)))
-      case OPCode.And(tpe)           => nop(stack2Add(tpe)(Expr.And(_, _)))
-      case OPCode.Or(tpe)            => nop(stack2Add(tpe)(Expr.Or(_, _)))
-      case OPCode.Xor(tpe)           => nop(stack2Add(tpe)(Expr.Xor(_, _)))
+      case OPCode.Add(tpe)  => nop(stack2Add(tpe)(Expr.BinaryExpr(_, _, SIR.BinaryOp.Add, tpe)))
+      case OPCode.Sub(tpe)  => nop(stack2Add(tpe)(Expr.BinaryExpr(_, _, SIR.BinaryOp.Sub, tpe)))
+      case OPCode.Mult(tpe) => nop(stack2Add(tpe)(Expr.BinaryExpr(_, _, SIR.BinaryOp.Mul, tpe)))
+      case OPCode.Div(tpe) =>
+        stack2(tpe)((e1, e2, r) =>
+          CodeStep(
+            SIR.SetFakeLocal(tempVar, Expr.BinaryExpr(e1, e2, SIR.BinaryOp.Div, tpe)),
+            Expr.GetFakeLocal(tempVar, tpe) :: r,
+            tempVar.inc
+          )
+        )
+      case OPCode.Rem(tpe) => stack2(tpe)((e1, e2, r) =>
+        CodeStep(
+          SIR.SetFakeLocal(tempVar, Expr.BinaryExpr(e1, e2, SIR.BinaryOp.Rem, tpe)),
+          Expr.GetFakeLocal(tempVar, tpe) :: r,
+          tempVar.inc
+        )
+      )
+      case OPCode.Neg(tpe) => nop(stack1Add(tpe)(Expr.UnaryExpr(_, SIR.UnaryOp.Neg, tpe)))
+      case OPCode.ShiftLeft(tpe) =>
+        nop(stack11Add(tpe, IRType.Int)((e2, e1) => Expr.BinaryExpr(e1, e2, SIR.BinaryOp.ShiftLeft, tpe)))
+      case OPCode.ShiftRight(tpe) =>
+        nop(stack11Add(tpe, IRType.Int)((e2, e1) => Expr.BinaryExpr(e1, e2, SIR.BinaryOp.ShiftRight, tpe)))
+      case OPCode.LogShiftRight(tpe) =>
+        nop(stack11Add(tpe, IRType.Int)((e2, e1) => Expr.BinaryExpr(e1, e2, SIR.BinaryOp.LogShiftRight, tpe)))
+      case OPCode.And(tpe) => nop(stack2Add(tpe)(Expr.BinaryExpr(_, _, SIR.BinaryOp.And, tpe)))
+      case OPCode.Or(tpe)  => nop(stack2Add(tpe)(Expr.BinaryExpr(_, _, SIR.BinaryOp.Or, tpe)))
+      case OPCode.Xor(tpe) => nop(stack2Add(tpe)(Expr.BinaryExpr(_, _, SIR.BinaryOp.Xor, tpe)))
 
       case OPCode.IntVarIncr(index, amount) => irSimple(SIR.IntVarIncr(index, amount), stack)
 
       case OPCode.Conversion(from, to) => nop(stack1Add(from)(Expr.Convert(_, opToIrType(to))))
 
-      case OPCode.Compare(tpe, nanBehavior) => nop(stack2Add(tpe)(Expr.Compare(_, _, nanBehavior)))
+      case OPCode.Compare(tpe, nanBehavior) =>
+        nop(stack2Add(tpe)(Expr.BinaryExpr(_, _, SIR.BinaryOp.Compare(nanBehavior), tpe)))
 
       case OPCode.IntIfZero(cond, branchPC) =>
         ir(
@@ -493,7 +517,7 @@ object OPCodeToSIR {
             )
           } else Left(s"Found invalid stack type in multi array initialization at $pc")
         } else Left(s"Not enough stack params for multi array initialization at $pc")
-      case OPCode.ArrayLength => nop(stack1Add(IRType.AnyArray)(Expr.ArrayLength))
+      case OPCode.ArrayLength => nop(stack1Add(IRType.AnyArray)(arr => Expr.ArrayLength(arr.asInstanceOf[Expr[Array[Any]]])))
 
       case OPCode.RefThrow => ir(stack1(IRType.AnyRef)((e, r) => (SIR.Throw(e), r)))
 

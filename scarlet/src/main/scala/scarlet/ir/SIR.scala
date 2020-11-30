@@ -1,6 +1,7 @@
 package scarlet.ir
 
 import cats.arrow.FunctionK
+import cats.data.Tuple2K
 import scarlet.classfile.denormalized.ConstantPoolEntry.{ClassInfo, FieldRefInfo}
 import scarlet.classfile.denormalized.Descriptor
 import scarlet.classfile.denormalized.attribute.MethodParameters
@@ -157,6 +158,8 @@ object SIR {
     }
   }
 
+  type Const[A, B] = A
+
   sealed trait Expr[A] {
     def tpe: Type.Aux[A]
 
@@ -178,10 +181,42 @@ object SIR {
       */
     def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] = this
 
+    def fold[B](base: B)(f: FunctionK[Tuple2K[Const[B, *], Expr, *], Const[B, *]]): B = base
+
     /**
       * If this expression contains the target
       */
-    def contains(target: Expr[_]): Boolean = target == this
+    def contains(target: Expr[_]): Boolean =
+      target == this || fold(false)(new FunctionK[Tuple2K[Const[Boolean, *], Expr, *], Const[Boolean, *]] {
+        override def apply[B](fa: Tuple2K[Const[Boolean, *], Expr, B]): Const[Boolean, B] =
+          fa.first || fa.second == target
+      })
+  }
+  sealed abstract class BinaryOp(val symbol: String)
+  object BinaryOp {
+    case object Add                                     extends BinaryOp("+")
+    case object Sub                                     extends BinaryOp("-")
+    case object Mul                                     extends BinaryOp("*")
+    case object Div                                     extends BinaryOp("/")
+    case object Rem                                     extends BinaryOp("%")
+    case object ShiftLeft                               extends BinaryOp("<<")
+    case object ShiftRight                              extends BinaryOp(">>")
+    case object LogShiftRight                           extends BinaryOp(">>>")
+    case object And                                     extends BinaryOp("&")
+    case object Or                                      extends BinaryOp("|")
+    case object Xor                                     extends BinaryOp("^")
+    case object Equal                                   extends BinaryOp("==")
+    case object NotEqual                                extends BinaryOp("!=")
+    case object LT                                      extends BinaryOp("<")
+    case object LE                                      extends BinaryOp("<=")
+    case object GE                                      extends BinaryOp(">=")
+    case object GT                                      extends BinaryOp(">")
+    case class Compare(nanBehavior: OPCode.NanBehavior) extends BinaryOp(s"compare($nanBehavior)")
+  }
+  sealed abstract class UnaryOp(val symbol: String)
+  object UnaryOp {
+    case object Not extends UnaryOp("!")
+    case object Neg extends UnaryOp("-")
   }
   object Expr {
     case class UninitializedRef(atAddress: Long, classInfo: ClassInfo) extends Expr[AnyRef] {
@@ -198,209 +233,39 @@ object SIR {
       override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = "null"
     }
 
-    case class Add[A](e1: Expr[A], e2: Expr[A]) extends Expr[A] {
-      override def tpe: Type.Aux[A]                                    = e1.tpe
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} + ${e2.toSyntax})"
+    case class BinaryExpr[A, E1, E2](e1: Expr[E1], e2: Expr[E2], op: BinaryOp, tpe: Type.Aux[A]) extends Expr[A] {
+      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} ${op.symbol} ${e2.toSyntax})"
 
       override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
         if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else Add(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
+        else BinaryExpr(e1.substitute(target, newExpr), e2.substitute(target, newExpr), op, tpe)
 
       override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        Add(f(e1), f(e2))
+        BinaryExpr(f(e1), f(e2), op, tpe)
+
+      override def fold[B](base: B)(f: FunctionK[Tuple2K[Const[B, *], Expr, *], Const[B, *]]): B = {
+        val b0 = base
+        val b1 = f(Tuple2K[Const[B, *], Expr, E1](b0, e1))
+        val b2 = f(Tuple2K[Const[B, *], Expr, E2](b1, e2))
+        b2
+      }
     }
-    case class Sub[A](e1: Expr[A], e2: Expr[A]) extends Expr[A] {
-      override def tpe: Type.Aux[A]                                    = e1.tpe
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} - ${e2.toSyntax})"
+
+    case class UnaryExpr[A, E](e: Expr[E], op: UnaryOp, tpe: Type.Aux[A]) extends Expr[A] {
+      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"${op.symbol}(${e.toSyntax})"
 
       override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
         if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else Sub(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
+        else UnaryExpr(e.substitute(target, newExpr), op, tpe)
 
       override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        Sub(f(e1), f(e2))
-    }
-    case class Mult[A](e1: Expr[A], e2: Expr[A]) extends Expr[A] {
-      override def tpe: Type.Aux[A]                                    = e1.tpe
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} * ${e2.toSyntax})"
+        UnaryExpr(f(e), op, tpe)
 
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else Mult(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        Mult(f(e1), f(e2))
-    }
-    case class Div[A](e1: Expr[A], e2: Expr[A]) extends Expr[A] {
-      override def tpe: Type.Aux[A]                                    = e1.tpe
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} / ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else Div(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        Div(f(e1), f(e2))
-    }
-    case class Rem[A](e1: Expr[A], e2: Expr[A]) extends Expr[A] {
-      override def tpe: Type.Aux[A]                                    = e1.tpe
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} % ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else Rem(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        Rem(f(e1), f(e2))
-    }
-    case class Neg[A](e: Expr[A]) extends Expr[A] {
-      override def tpe: Type.Aux[A]                                    = e.tpe
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(-${e.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else Neg(e.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        Neg(f(e))
-    }
-    case class ShiftLeft[A](e1: Expr[A], e2: Expr[Int]) extends Expr[A] {
-      override def tpe: Type.Aux[A]                                    = e1.tpe
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} << ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else ShiftLeft(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        ShiftLeft(f(e1), f(e2))
+      override def fold[B](base: B)(f: FunctionK[Tuple2K[Const[B, *], Expr, *], Const[B, *]]): B =
+        f(Tuple2K[Const[B, *], Expr, E](base, e))
     }
 
-    case class ShiftRight[A](e1: Expr[A], e2: Expr[Int]) extends Expr[A] {
-      override def tpe: Type.Aux[A]                                    = e1.tpe
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} >> ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else ShiftRight(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        ShiftRight(f(e1), f(e2))
-    }
-    case class LogShiftRight[A](e1: Expr[A], e2: Expr[Int]) extends Expr[A] {
-      override def tpe: Type.Aux[A]                                    = e1.tpe
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} >>> ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else LogShiftRight(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        LogShiftRight(f(e1), f(e2))
-    }
-
-    case class And[A](e1: Expr[A], e2: Expr[A]) extends Expr[A] {
-      override def tpe: Type.Aux[A]                                    = e1.tpe
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} & ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else And(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        And(f(e1), f(e2))
-    }
-    case class Or[A](e1: Expr[A], e2: Expr[A]) extends Expr[A] {
-      override def tpe: Type.Aux[A]                                    = e1.tpe
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} | ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else Or(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        Or(f(e1), f(e2))
-    }
-    case class Xor[A](e1: Expr[A], e2: Expr[A]) extends Expr[A] {
-      override def tpe: Type.Aux[A]                                    = e1.tpe
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} ^ ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else Xor(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        Xor(f(e1), f(e2))
-    }
-
-    case class Eq[A](e1: Expr[A], e2: Expr[A]) extends Expr[Boolean] {
-      override def tpe: Type.Aux[Boolean]                              = Type.Boolean
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} == ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[Boolean] =
-        if (this == target) newExpr.asInstanceOf[Expr[Boolean]]
-        else Eq(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[Boolean] =
-        Eq(f(e1), f(e2))
-    }
-    case class Not(e: Expr[Boolean]) extends Expr[Boolean] {
-      override def tpe: Type.Aux[Boolean]                              = Type.Boolean
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"!(${e.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[Boolean] =
-        if (this == target) newExpr.asInstanceOf[Expr[Boolean]]
-        else Not(e.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[Boolean] =
-        Not(f(e))
-    }
-    case class LT(e1: Expr[Int], e2: Expr[Int]) extends Expr[Boolean] {
-      override def tpe: Type.Aux[Boolean]                              = Type.Boolean
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} < ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[Boolean] =
-        if (this == target) newExpr.asInstanceOf[Expr[Boolean]]
-        else LT(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[Boolean] =
-        LT(f(e1), f(e2))
-    }
-    case class GE(e1: Expr[Int], e2: Expr[Int]) extends Expr[Boolean] {
-      override def tpe: Type.Aux[Boolean]                              = Type.Boolean
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} >= ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[Boolean] =
-        if (this == target) newExpr.asInstanceOf[Expr[Boolean]]
-        else GE(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[Boolean] =
-        GE(f(e1), f(e2))
-    }
-    case class GT(e1: Expr[Int], e2: Expr[Int]) extends Expr[Boolean] {
-      override def tpe: Type.Aux[Boolean]                              = Type.Boolean
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} > ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[Boolean] =
-        if (this == target) newExpr.asInstanceOf[Expr[Boolean]]
-        else GT(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[Boolean] =
-        GE(f(e1), f(e2))
-    }
-    case class LE(e1: Expr[Int], e2: Expr[Int]) extends Expr[Boolean] {
-      override def tpe: Type.Aux[Boolean]                              = Type.Boolean
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} <= ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[Boolean] =
-        if (this == target) newExpr.asInstanceOf[Expr[Boolean]]
-        else LE(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[Boolean] =
-        LE(f(e1), f(e2))
-    }
-
-    case class Convert[A](e: Expr[_], to: Type.Aux[A]) extends Expr[A] {
+    case class Convert[A, E](e: Expr[E], to: Type.Aux[A]) extends Expr[A] {
       override def tpe: Type.Aux[A]                                    = to
       override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"${e.toSyntax}.asInstanceOf[${to.describe}]"
 
@@ -410,20 +275,9 @@ object SIR {
 
       override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
         Convert(f(e), to)
-    }
 
-    case class Compare[A](e1: Expr[A], e2: Expr[A], nanBehavior: OPCode.NanBehavior) extends Expr[Int] {
-      override def tpe: Type.Aux[Int] = Type.Int
-
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String =
-        s"${e1.toSyntax}.compare(${e2.toSyntax})" //TODO: Account for nan behavior
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[Int] =
-        if (this == target) newExpr.asInstanceOf[Expr[Int]]
-        else Compare(e1.substitute(target, newExpr), e2.substitute(target, newExpr), nanBehavior)
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[Int] =
-        Compare(f(e1), f(e2), nanBehavior)
+      override def fold[B](base: B)(f: FunctionK[Tuple2K[Const[B, *], Expr, *], Const[B, *]]): B =
+        f(Tuple2K[Const[B, *], Expr, E](base, e))
     }
 
     case class GetFakeLocal[A](tempVar: TempVar, tpe: Type.Aux[A]) extends Expr[A] {
@@ -434,7 +288,7 @@ object SIR {
         s"(stack_${index}_$jumpTarget: ${tpe.describe})"
     }
 
-    case class IsInstanceOf(e: Expr[_], classInfo: ClassInfo) extends Expr[Int] {
+    case class IsInstanceOf[E](e: Expr[E], classInfo: ClassInfo) extends Expr[Int] {
       override def tpe: Type.Aux[Int]                                  = Type.Int
       override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"${e.toSyntax}.isInstanceOf[${tpe.describe}]"
 
@@ -444,9 +298,12 @@ object SIR {
 
       override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[Int] =
         IsInstanceOf(f(e), classInfo)
+
+      override def fold[B](base: B)(f: FunctionK[Tuple2K[Const[B, *], Expr, *], Const[B, *]]): B =
+        f(Tuple2K[Const[B, *], Expr, E](base, e))
     }
 
-    case class ArrayLength(e: Expr[Array[_]]) extends Expr[Int] {
+    case class ArrayLength[E](e: Expr[Array[E]]) extends Expr[Int] {
       override def tpe: Type.Aux[Int]                                  = Type.Int
       override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"${e.toSyntax}.length"
 
@@ -456,6 +313,9 @@ object SIR {
 
       override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[Int] =
         ArrayLength(f(e))
+
+      override def fold[B](base: B)(f: FunctionK[Tuple2K[Const[B, *], Expr, *], Const[B, *]]): B =
+        f(Tuple2K[Const[B, *], Expr, Array[E]](base, e))
     }
   }
 
@@ -469,13 +329,6 @@ object SIR {
 
   case object Nop                        extends SIR
   case class MaybeInit(clazz: ClassInfo) extends SIR
-  case class NotZero(expr: Expr[_]) extends SIR {
-    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      NotZero(expr.substitute(target, newExpr))
-
-    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      NotZero(f(expr))
-  }
   case class GetLocal(tempVar: TempVar, index: Int) extends SIR
   case class SetLocal(index: Int, e: Expr[_]) extends SIR {
     override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
@@ -643,7 +496,6 @@ object SIR {
     sir match {
       case Nop              => Nil
       case MaybeInit(clazz) => Seq(s"classOf[${clazz.name}]")
-      case NotZero(expr)    => Seq(s"notZero(${expr.toSyntax})")
       case GetLocal(tempVar, index) =>
         Seq(syntaxExtra.methodParams.flatMap(_.parameters.lift(index - 1)).flatMap(_.name) match {
           case Some(name) => s"var local_${tempVar.index} = $name"
