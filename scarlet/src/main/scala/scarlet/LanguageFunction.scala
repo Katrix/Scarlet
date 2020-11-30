@@ -90,9 +90,8 @@ object LanguageFunction {
 
       expanded.map { classfile =>
         val newMethods = classfile.methods.map { m =>
-          val (codeVec, newAttributes) = m.attributes.partition {
-            case _: Code => true
-            case _       => false
+          val codeVec = m.attributes.collect {
+            case c: Code => c
           }
 
           val methodData = if (codeVec.size > 1) {
@@ -108,7 +107,7 @@ object LanguageFunction {
             m.accessFlags,
             m.name,
             m.descriptor,
-            newAttributes,
+            m.attributes,
             methodData
           )
         }
@@ -205,9 +204,9 @@ object LanguageFunction {
         in: ClassfileWithData[Unit, Unit, LongMap[NEL[String]], LongMap[DeOPCode]]
     ): EitherNel[String, ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.OPCodeBasicBlock]]] =
       Right(
-        in.rightmapMethodWithMethod((method, opCode) =>
+        in.rightmapMethodWithMethod { (method, opCode) =>
           CFG.createFromOPCode(opCode, method.attributes.collectFirst { case code: Code => code })
-        )
+        }
       )
 
     override def print(out: ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.OPCodeBasicBlock]]): Str = {
