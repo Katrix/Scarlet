@@ -50,33 +50,30 @@ object OPCodeToSIR {
   def convert(code: CFG[CFG.OPCodeBasicBlock]): CFG[CFG.SIRBlock] = {
     import cats.syntax.all._
     import scalax.collection.GraphPredef._
-    import scalax.collection.edge.Implicits._
     import scalax.collection.edge.LBase.LEdgeImplicits
     import scalax.collection.immutable.Graph
     object TupleLabelImplicit extends LEdgeImplicits[(code.graph.NodeT, code.graph.NodeT)]
     import TupleLabelImplicit._
 
-    val strongComponents = code.graph.strongComponentTraverser().toVector
-
-    val sortedNodes: Vector[code.graph.NodeT] = if (strongComponents.length > 1) {
-      val sccEdges = for {
-        c1 <- strongComponents
-        c2 <- strongComponents
-        if c1.ne(c2)
-        n1 <- c1.nodes
-        n2 <- c2.nodes
-        if code.graph.contains(n1.value ~> n2.value)
-      } yield (c1 ~+> c2)((n1, n2))
-
-      val scc = Graph.from(strongComponents, sccEdges)
+    val scc = CFG.sccGraph(code.graph)
+    val sortedNodes: Vector[code.graph.NodeT] = if (scc.nodes.sizeIs > 1) {
       scc.topologicalSortByComponent.toVector
-        .flatMap(_.getOrElse(sys.error("impossible")).toVector)
+        .flatMap(
+          _.getOrElse(sys.error("impossible"))
+            .withLayerOrdering(scc.NodeOrdering { (n1, n2) =>
+              val l1 = n1.value.nodes.view.map(_.value.leader).minOption
+              val l2 = n2.value.nodes.view.map(_.value.leader).minOption
+
+              l1.compare(l2)
+            })
+            .toVector
+        )
         .distinct
         .flatMap { sccNode =>
           if (sccNode.value.nodes.size == 1) {
-            Seq(sccNode.value.nodes.head)
+            Seq(sccNode.value.nodes.head.asInstanceOf[code.graph.NodeT])
           } else {
-            val subgraph     = sccNode.value.to(Graph)
+            val subgraph     = sccNode.value
             val earliestNode = sccNode.incoming.minByOption(_.label._2.value.leader)
             val startNode    = earliestNode.map(_.label._2).map(n => subgraph.get(n.value)).getOrElse(subgraph.nodes.head)
 
@@ -307,7 +304,7 @@ object OPCodeToSIR {
       case OPCode.VarLoad(tpe, index) =>
         Right(
           CodeStep(
-            SIR.GetLocal(tempVar, index),
+            SIR.SetFakeLocal(tempVar, Expr.GetLocal(index)),
             Expr.GetFakeLocal(tempVar, tpe) :: stack,
             tempVar.inc
           )
@@ -317,7 +314,7 @@ object OPCodeToSIR {
         stack11(IRType.Array(irTpe), IRType.Int) {
           case (e2, e1, r) =>
             CodeStep(
-              SIR.GetArray(tempVar, e1, e2),
+              SIR.SetFakeLocal(tempVar, Expr.GetArray(e1, e2)),
               Expr.GetFakeLocal(tempVar, irTpe) :: r,
               tempVar.inc
             )
@@ -405,13 +402,14 @@ object OPCodeToSIR {
             tempVar.inc
           )
         )
-      case OPCode.Rem(tpe) => stack2(tpe)((e1, e2, r) =>
-        CodeStep(
-          SIR.SetFakeLocal(tempVar, Expr.BinaryExpr(e1, e2, SIR.BinaryOp.Rem, tpe)),
-          Expr.GetFakeLocal(tempVar, tpe) :: r,
-          tempVar.inc
+      case OPCode.Rem(tpe) =>
+        stack2(tpe)((e1, e2, r) =>
+          CodeStep(
+            SIR.SetFakeLocal(tempVar, Expr.BinaryExpr(e1, e2, SIR.BinaryOp.Rem, tpe)),
+            Expr.GetFakeLocal(tempVar, tpe) :: r,
+            tempVar.inc
+          )
         )
-      )
       case OPCode.Neg(tpe) => nop(stack1Add(tpe)(Expr.UnaryExpr(_, SIR.UnaryOp.Neg, tpe)))
       case OPCode.ShiftLeft(tpe) =>
         nop(stack11Add(tpe, IRType.Int)((e2, e1) => Expr.BinaryExpr(e1, e2, SIR.BinaryOp.ShiftLeft, tpe)))
@@ -450,7 +448,7 @@ object OPCodeToSIR {
       case OPCode.GetStatic(fieldRefInfo) =>
         Right(
           CodeStep(
-            SIR.GetStatic(tempVar, fieldRefInfo),
+            SIR.SetFakeLocal(tempVar, Expr.GetStatic(fieldRefInfo)),
             Expr.GetFakeLocal(tempVar, IRType.fromDescriptor(fieldRefInfo.nameAndType.descriptor)) :: stack,
             tempVar.inc
           )
@@ -460,7 +458,7 @@ object OPCodeToSIR {
       case OPCode.GetField(fieldRefInfo) =>
         stack1(IRType.AnyRef)((e, r) =>
           CodeStep(
-            SIR.GetField(tempVar, e, fieldRefInfo),
+            SIR.SetFakeLocal(tempVar, Expr.GetField(e, fieldRefInfo)),
             Expr.GetFakeLocal(tempVar, IRType.fromDescriptor(fieldRefInfo.nameAndType.descriptor)) :: r,
             tempVar.inc
           )
@@ -479,7 +477,7 @@ object OPCodeToSIR {
       case OPCode.NewArray(tpe) =>
         stack1(IRType.Int) { (e, r) =>
           CodeStep(
-            SIR.NewArray(tempVar, e, opToIrType(tpe)),
+            SIR.SetFakeLocal(tempVar, Expr.NewArray(e, opToIrType(tpe))),
             Expr.GetFakeLocal(tempVar, IRType.Array(opToIrType(tpe))) :: r,
             tempVar.inc
           )
@@ -487,7 +485,7 @@ object OPCodeToSIR {
       case OPCode.RefNewArray(classInfo) =>
         stack1(IRType.Int) { (e, r) =>
           CodeStep(
-            SIR.NewArray(tempVar, e, IRType.Ref(classInfo)),
+            SIR.SetFakeLocal(tempVar, Expr.NewArray(e, IRType.Ref(classInfo))),
             Expr.GetFakeLocal(tempVar, IRType.Array(IRType.Ref(classInfo))) :: r,
             tempVar.inc
           )
@@ -510,21 +508,22 @@ object OPCodeToSIR {
 
             Right(
               CodeStep(
-                SIR.NewMultiArray(tempVar, tpe, sizesExpr),
+                SIR.SetFakeLocal(tempVar, Expr.NewMultiArray(tpe, sizesExpr)),
                 Expr.GetFakeLocal(tempVar, tpe) :: newStack,
                 tempVar.inc
               )
             )
           } else Left(s"Found invalid stack type in multi array initialization at $pc")
         } else Left(s"Not enough stack params for multi array initialization at $pc")
-      case OPCode.ArrayLength => nop(stack1Add(IRType.AnyArray)(arr => Expr.ArrayLength(arr.asInstanceOf[Expr[Array[Any]]])))
+      case OPCode.ArrayLength =>
+        nop(stack1Add(IRType.AnyArray)(arr => Expr.ArrayLength(arr.asInstanceOf[Expr[Array[Any]]])))
 
       case OPCode.RefThrow => ir(stack1(IRType.AnyRef)((e, r) => (SIR.Throw(e), r)))
 
       case OPCode.Cast(classInfo) =>
         stack1(IRType.AnyRef)((e, r) =>
           CodeStep(
-            SIR.Cast(tempVar, e, IRType.Ref(classInfo)),
+            SIR.SetFakeLocal(tempVar, Expr.Cast(e, IRType.Ref(classInfo))),
             Expr.GetFakeLocal(tempVar, IRType.Ref(classInfo)) :: r,
             tempVar.inc
           )
@@ -577,7 +576,7 @@ object OPCodeToSIR {
         case uninit @ Expr.UninitializedRef(atAddress, classInfo) =>
           Right(
             CodeStep(
-              SIR.New(tempVar, classInfo, paramsVec),
+              SIR.SetFakeLocal(tempVar, Expr.New(classInfo, paramsVec)),
               stack.map(_.substitute(uninit, Expr.GetFakeLocal(tempVar, IRType.Ref(classInfo)))),
               tempVar.inc
             )
@@ -603,14 +602,16 @@ object OPCodeToSIR {
     val methodName = methodInfo.nameAndType.name
 
     if (params.lengthIs == paramsVec.length) {
-      val call = SIR.Call(
+      val call = SIR.SetFakeLocal(
         tempVar,
-        callType,
-        methodInfo.clazz,
-        methodName,
-        desc,
-        if (callType == SIR.CallType.Static) None else Some(paramsVec.head),
-        paramsVec.tail
+        Expr.Call(
+          callType,
+          methodInfo.clazz,
+          methodName,
+          desc,
+          if (callType == SIR.CallType.Static) None else Some(paramsVec.head),
+          paramsVec.tail
+        )
       )
 
       desc.returnType match {
