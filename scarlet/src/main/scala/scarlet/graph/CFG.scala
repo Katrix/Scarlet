@@ -180,14 +180,13 @@ object CFG {
     Graph.from(sliced.nodes.map(_.value), sliced.edges.map(_.toOuter).diff(newEdges)).asInstanceOf[Graph[RN, E]]
   }
 
-  def sccGraph[N](graph: Graph[N, DiEdge]): Graph[Graph[N, DiEdge], LDiEdge] = {
+  def stronglyConnectedComponents[N](graph: Graph[N, DiEdge]): Graph[graph.Component, LDiEdge] = {
     import scalax.collection.edge.Implicits._
     import scalax.collection.immutable.Graph
 
     val strongComponents =
       graph
         .strongComponentTraverser(GraphTraversal.Parameters(kind = GraphTraversal.DepthFirst))
-        .map(_.to(Graph))
         .toVector
 
     if (strongComponents.length > 1) {
@@ -206,6 +205,22 @@ object CFG {
     }
   }
 
+  def graphCondensate[N](graph: Graph[N, DiEdge]): Graph[Graph[N, DiEdge], LDiEdge] = {
+    val scc = stronglyConnectedComponents(graph)
+    def componentToGraph(component: Graph[N, DiEdge]#Component): Graph[N, DiEdge] =
+      Graph.from(component.nodes.map(_.toOuter), component.edges.map(_.toOuter))
+
+    val edges = scc.edges.map { edge =>
+      val from = componentToGraph(edge.from.value)
+      val to   = componentToGraph(edge.to.value)
+
+      LDiEdge(from, to)(edge.label)
+    }
+    val nodes = scc.nodes.map(node => componentToGraph(node.value))
+    Graph.from(nodes, edges)
+  }
+
+  /*
   def structure(cfg: CFG[SIRBlock]) = {
     val regions = sccGraph(cfg.graph)
     val sortedNodes = regions.topologicalSortByComponent.toVector.flatMap(
@@ -233,6 +248,7 @@ object CFG {
 
     ???
   }
+   */
 
   def structureAcyclic[N, E[+X] <: EdgeLikeIn[X]](graph: Graph[N, E]) = {
     graph.topologicalSort.map { order => }

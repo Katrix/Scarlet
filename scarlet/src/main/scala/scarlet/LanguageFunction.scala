@@ -181,7 +181,7 @@ object LanguageFunction {
 
   def sirBlockLabel(block: CFG.SIRBlock): String = block match {
     case CFG.SIRBlock.SIRCodeBasicBlock(code)               => code.head._1.toString
-    case CFG.SIRBlock.SIRErrorBlock(_, _, _, codeWithStack) => codeWithStack.head._1.toString
+    case CFG.SIRBlock.SIRErrorBlock(_, _, _, codeWithStack) => codeWithStack.headOption.fold("<error>")(_._1.toString)
   }
 
   def formatErrorLines(map: LongMap[NEL[String]]): String = {
@@ -346,12 +346,8 @@ object LanguageFunction {
 
     override def print(out: ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.SIRBlock]]): Str = {
       val dotOut = out.rightmapMethodWithMethod { (method, cfg) =>
-        val root = DotRootGraph(directed = true, Some(Id(method.name)))
-        implicit val syntaxExtra: SIR.SyntaxExtra = SIR.SyntaxExtra(
-          method.attributes.collectFirst {
-            case m: MethodParameters => m
-          }
-        )
+        val root                                  = DotRootGraph(directed = true, Some(Id(method.name)))
+        implicit val syntaxExtra: SIR.SyntaxExtra = SIR.SyntaxExtra.fromAttributes(method.attributes)
 
         cfg.graph.toDot(
           root,
@@ -417,11 +413,7 @@ object LanguageFunction {
         out: ClassfileWithData[Unit, Unit, LongMap[NEL[String]], LongMap[SIRClassSyntax]]
     ): Str = {
       val stringOut = out.rightmapMethodWithMethod { (method, sirCode) =>
-        implicit val syntaxExtra: SIR.SyntaxExtra = SIR.SyntaxExtra(
-          method.attributes.collectFirst {
-            case m: MethodParameters => m
-          }
-        )
+        implicit val syntaxExtra: SIR.SyntaxExtra = SIR.SyntaxExtra.fromAttributes(method.attributes)
 
         sirCode.toVector.flatMap {
           case (pc, v) =>

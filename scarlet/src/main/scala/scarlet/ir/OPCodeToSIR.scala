@@ -6,6 +6,7 @@ import scarlet.classfile.denormalized.opcodes.OPCode.{MethodInfo, Type => OPType
 import scarlet.graph.CFG
 import scarlet.ir.SIR.{Expr, TempVar, Type => IRType}
 
+import scala.annotation.tailrec
 import scala.collection.immutable.{LongMap, TreeMap}
 import scala.language.implicitConversions
 
@@ -55,7 +56,7 @@ object OPCodeToSIR {
     object TupleLabelImplicit extends LEdgeImplicits[(code.graph.NodeT, code.graph.NodeT)]
     import TupleLabelImplicit._
 
-    val scc = CFG.sccGraph(code.graph)
+    val scc = CFG.stronglyConnectedComponents(code.graph)
     val sortedNodes: Vector[code.graph.NodeT] = if (scc.nodes.sizeIs > 1) {
       scc.topologicalSortByComponent.toVector
         .flatMap(
@@ -70,10 +71,11 @@ object OPCodeToSIR {
         )
         .distinct
         .flatMap { sccNode =>
-          if (sccNode.value.nodes.size == 1) {
-            Seq(sccNode.value.nodes.head.asInstanceOf[code.graph.NodeT])
+          val component = sccNode.value
+          if (component.nodes.size == 1) {
+            Seq(component.nodes.head.asInstanceOf[code.graph.NodeT])
           } else {
-            val subgraph     = sccNode.value
+            val subgraph     = Graph.from(component.nodes.map(_.toOuter), component.edges.map(_.toOuter))
             val earliestNode = sccNode.incoming.minByOption(_.label._2.value.leader)
             val startNode    = earliestNode.map(_.label._2).map(n => subgraph.get(n.value)).getOrElse(subgraph.nodes.head)
 
@@ -160,9 +162,21 @@ object OPCodeToSIR {
               (baseCode, outTempVar)
             }
 
+            @tailrec
+            def runWhileChangesN[A](n: Int, f: A => A)(oldA: A): A =
+              if (n == 0) oldA
+              else {
+                val newA = f(oldA)
+                if(oldA != newA) runWhileChangesN(n - 1, f)(newA)
+                else newA
+              }
+
             val sirBlock = CFG.SIRBlock.SIRCodeBasicBlock(code.to(TreeMap))
+            //Think it should be safe to run this multiple times
+            //TODO: Make this configurable
+            val simplifiedSirBlock = runWhileChangesN(1, Inliner.removeFakesFromSIR)(sirBlock)
             BlockStep(
-              accNodes.updated(node, sirBlock),
+              accNodes.updated(node, simplifiedSirBlock),
               predecessorsInfo.updated(node, StackInfo.fromStack(stack)),
               finalTempVar
             )
@@ -516,7 +530,7 @@ object OPCodeToSIR {
           } else Left(s"Found invalid stack type in multi array initialization at $pc")
         } else Left(s"Not enough stack params for multi array initialization at $pc")
       case OPCode.ArrayLength =>
-        nop(stack1Add(IRType.AnyArray)(arr => Expr.ArrayLength(arr.asInstanceOf[Expr[Array[Any]]])))
+        nop(stack1Add(IRType.AnyArray)(arr => Expr.ArrayLength(arr)))
 
       case OPCode.RefThrow => ir(stack1(IRType.AnyRef)((e, r) => (SIR.Throw(e), r)))
 
@@ -536,7 +550,8 @@ object OPCodeToSIR {
 
   def handleInvoke(invoke: OPCode.Invoke, stack: Stack, tempVar: TempVar, pc: Long): Either[String, CodeStep] = {
     val nameAndType = invoke.methodRefInfo.nameAndType
-    val descriptor  = nameAndType.descriptor
+
+    val descriptor = nameAndType.descriptor
     val mdesc = descriptor match {
       case meth: Descriptor.MethodDescriptor => Right(meth)
       case _                                 => Left(s"Found unexpected descriptor type ${descriptor.getClass.getSimpleName} in call at $pc")
@@ -610,7 +625,7 @@ object OPCodeToSIR {
           methodName,
           desc,
           if (callType == SIR.CallType.Static) None else Some(paramsVec.head),
-          paramsVec.tail
+          if (callType == SIR.CallType.Static) paramsVec else paramsVec.tail
         )
       )
 
