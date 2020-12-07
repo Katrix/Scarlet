@@ -75,10 +75,6 @@ object Inliner {
     c := f(5 / x, a)
      */
 
-    if(block.code.sizeIs > 10) {
-      val r = identity(block.code)
-    }
-
     val tempVarUses = block.code.foldLeft(Map.empty[TempVar, Int]) {
       case (topAcc, (_, codes)) =>
         codes.foldLeft(topAcc) { (acc, code) =>
@@ -100,11 +96,11 @@ object Inliner {
 
     type PropagateState[A] = State[PropagationStep, A]
 
-    lazy val exprTraverser: FunctionK[Expr, Compose2[PropagateState, Expr, *]] =
+    def exprTraverser(skipClearQueue: Boolean): FunctionK[Expr, Compose2[PropagateState, Expr, *]] =
       new FunctionK[Expr, Compose2[PropagateState, Expr, *]] {
-        override def apply[Z](expr: Expr[Z]): PropagateState[Expr[Z]] = {
+        override def apply[Z](expr: Expr[Z]): PropagateState[Expr[Z]] =
           State.get[PropagationStep].flatMap { step =>
-            if(step.queue.isEmpty) State.pure(expr)
+            if (step.queue.isEmpty) State.pure(expr)
             else {
               expr match {
                 case Expr.GetFakeLocal(tempVar, _) =>
@@ -134,28 +130,27 @@ object Inliner {
                     State.pure(expr)
                   }
                 case _ =>
-                  val baseRun = expr.monoTraverseDeep[PropagateState](exprTraverser)
+                  val baseRun = expr.monoTraverse[PropagateState](exprTraverser(skipClearQueue = false))
 
-                  if (canExprCauseExceptions(expr))
+                  if (canExprCauseExceptions(expr) && !skipClearQueue)
                     baseRun.modify(_.removeSideEffectsExprs)
                   else
                     baseRun
               }
             }
           }
-        }
       }
 
     val resultStep = block.code.foldLeft(PropagationStep(Queue.empty, block.code)) {
       case (topStep, (idx, codes)) =>
         codes.zipWithIndex.foldLeft(topStep) {
           case (startStep, (ir, innerIdx)) =>
-
-            def substituteExpr[A](e: Expr[A]): (PropagationStep, Expr[A]) =
-              exprTraverser(e).run(startStep).value
+            def substituteExpr[A](e: Expr[A], skipClearQueue: Boolean): (PropagationStep, Expr[A]) =
+              exprTraverser(skipClearQueue)(e).run(startStep).value
 
             def trySubstitute: PropagationStep = {
-              val (newStep, newIR) = ir.monoTraverseDeep[PropagateState](exprTraverser).run(startStep).value
+              val (newStep, newIR) =
+                ir.monoTraverse[PropagateState](exprTraverser(skipClearQueue = false)).run(startStep).value
 
               newStep.copy(
                 resultCode = newStep.resultCode.updatedWith(idx) {
@@ -166,7 +161,7 @@ object Inliner {
             }
 
             def addTempvar[A](tempVar: TempVar, e: Expr[A]): PropagationStep = {
-              val (newStep, newE) = substituteExpr(e)
+              val (newStep, newE) = substituteExpr(e, skipClearQueue = true)
               newStep.copy(
                 queue = newStep.queue.enqueue(
                   QueueEntry(
@@ -177,7 +172,12 @@ object Inliner {
                       case _                           => Some(Vector(SIR.Nop))
                     }
                   )
-                )
+                ),
+                //We also update the existing code incase e don't inline this Expr further
+                resultCode = newStep.resultCode.updatedWith(idx) {
+                  case Some(vec) if vec.sizeIs > 1 => Some(vec.updated(innerIdx, SIR.SetFakeLocal(tempVar, newE)))
+                  case _                           => Some(Vector(SIR.SetFakeLocal(tempVar, newE)))
+                }
               )
             }
 
@@ -190,10 +190,12 @@ object Inliner {
                   case Some(uses) if uses > 1 => trySubstitute //Treat it like normal
                   case Some(1)                => addTempvar(tempVar, e)
                   case Some(0)                =>
+                    trySubstitute // Should be unreachable, but just in case, we treat it like normal
+
                     //Def here to avoid existential warning by capturing the existential
                     def capture[A](expr: Expr[A]): PropagationStep = {
                       //We replace the code with execute expr
-                      val (newStep, newE) = substituteExpr(expr)
+                      val (newStep, newE) = substituteExpr(expr, skipClearQueue = false)
 
                       newStep.copy(resultCode = newStep.resultCode.updatedWith(idx) {
                         case Some(value) => Some(value.updated(innerIdx, SIR.ExecuteExpr(newE)))
@@ -203,7 +205,21 @@ object Inliner {
 
                     capture(e)
 
-                  case None => trySubstitute // Should be unreachable, but just in case, we treat it like normal
+                  case None =>
+                    //If we get here, we didn't have usage data for it, which means it's unused
+
+                    //Def here to avoid existential warning by capturing the existential
+                    def capture[A](expr: Expr[A]): PropagationStep = {
+                      //We replace the code with execute expr
+                      val (newStep, newE) = substituteExpr(expr, skipClearQueue = false)
+
+                      newStep.copy(resultCode = newStep.resultCode.updatedWith(idx) {
+                        case Some(value) => Some(value.updated(innerIdx, SIR.ExecuteExpr(newE)))
+                        case None        => Some(Vector(SIR.ExecuteExpr(newE)))
+                      })
+                    }
+
+                    capture(e)
                 }
               case SIR.MaybeInit(_) | SIR.SetArray(_, _, _) | SIR.SetField(_, _, _) | SIR.SetStatic(_, _) |
                   SIR.CallSuper(_, _) | SIR.MonitorEnter(_) | SIR.MonitorExit(_) =>

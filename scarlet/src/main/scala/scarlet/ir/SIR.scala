@@ -10,6 +10,7 @@ import scarlet.ir.SIR.Expr
 import perspective._
 
 import scala.annotation.tailrec
+import scala.collection.immutable.TreeMap
 
 /**
   * A stackless IR to help with not having to deal with the stack further into
@@ -36,7 +37,7 @@ sealed trait SIR {
   def monoTraverseDeep[G[_]: Monad](f: Expr ~>: Compose2[G, Expr, *]): G[SIR] = {
     lazy val deepTraverser: Expr ~>: Compose2[G, Expr, *] = new (Expr ~>: Compose2[G, Expr, *]) {
       override def apply[Z](expr: Expr[Z]): Compose2[G, Expr, Z] =
-        expr.monoTraverseDeep(deepTraverser).flatMap(e => f(e))
+        expr.monoTraverse(deepTraverser).flatMap(e => f(e))
     }
 
     monoTraverse(deepTraverser)
@@ -57,7 +58,7 @@ sealed trait SIR {
           val b1   = fa._1
           val expr = fa._2
 
-          val b2 = expr.monoFoldLeft(b1)(deepFolder)
+          val b2 = expr.monoFoldLeftShallow(b1)(deepFolder)
 
           f((b2, expr))
         }
@@ -232,7 +233,7 @@ object SIR {
             val b1   = fa._1
             val expr = fa._2
 
-            val b2 = expr.monoFoldLeft(b1)(deepFolder)
+            val b2 = expr.monoFoldLeftShallow(b1)(deepFolder)
 
             f((b2, expr))
           }
@@ -253,7 +254,7 @@ object SIR {
     def monoTraverseDeep[G[_]: Monad](f: Expr ~>: Compose2[G, Expr, *]): G[Expr[A]] = {
       lazy val deepTraverser: Expr ~>: Compose2[G, Expr, *] = new (Expr ~>: Compose2[G, Expr, *]) {
         override def apply[Z](expr: Expr[Z]): Compose2[G, Expr, Z] =
-          expr.monoTraverseDeep(deepTraverser).flatMap(e => f(e))
+          expr.monoTraverse(deepTraverser).flatMap(e => f(e))
       }
 
       monoTraverse(deepTraverser)
@@ -654,6 +655,8 @@ object SIR {
         case t: LocalVariableTable => t
       }
     )
+
+    val none: SyntaxExtra = SyntaxExtra(None, Nil)
   }
 
   def toSyntax(sir: SIR)(implicit syntaxExtra: SyntaxExtra): Seq[String] =
@@ -688,4 +691,9 @@ object SIR {
       case MonitorExit(e)     => Seq(s"${e.toSyntax}.synchronizedEnd")
       case Throw(e)           => Seq(s"throw ${e.toSyntax}")
     }
+
+  def toSyntaxCode(code: TreeMap[Long, Vector[SIR]])(implicit syntaxExtra: SyntaxExtra): String =
+    code
+      .map(t => s"${t._1}: ${t._2.flatMap(SIR.toSyntax(_)).mkString("\n")}")
+      .mkString("\n")
 }

@@ -174,7 +174,7 @@ object OPCodeToSIR {
             val sirBlock = CFG.SIRBlock.SIRCodeBasicBlock(code.to(TreeMap))
             //Think it should be safe to run this multiple times
             //TODO: Make this configurable
-            val simplifiedSirBlock = runWhileChangesN(1, Inliner.removeFakesFromSIR)(sirBlock)
+            val simplifiedSirBlock = runWhileChangesN(5, Inliner.removeFakesFromSIR)(sirBlock)
             BlockStep(
               accNodes.updated(node, simplifiedSirBlock),
               predecessorsInfo.updated(node, StackInfo.fromStack(stack)),
