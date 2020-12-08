@@ -2,7 +2,6 @@ package scarlet
 
 import java.io.InputStream
 
-import cats.arrow.FunctionK
 import cats.data.Validated.Valid
 import cats.data.{EitherNel, ValidatedNel, NonEmptyList => NEL}
 import cats.syntax.all._
@@ -15,9 +14,9 @@ import scarlet.classfile.denormalized.attribute._
 import scarlet.classfile.denormalized.opcodes.{OPCode => DeOPCode}
 import scarlet.classfile.denormalized.{Classfile => DenormClassfile}
 import scarlet.classfile.raw.{ClassfileCodec, Classfile => RawClassfile}
-import scarlet.graph.{CFG, OPCodeCFG}
-import scarlet.ir.OPCodeToSIR.{StackFrame, CodeWithStack => SIRCode}
-import scarlet.ir.{ClassfileWithData, FieldWithData, MethodWithData, OPCodeToSIR, SimpleClassSyntax}
+import scarlet.graph.CFG
+import scarlet.ir.OPCodeToSIR.StackFrame
+import scarlet.ir._
 import scodec.Err
 
 import scala.collection.immutable.LongMap
@@ -60,6 +59,7 @@ object LanguageFunction {
     override def print(out: DenormClassfile): fansi.Str = Scarlet.printer(out)
   }
 
+  //Side path. Not used in further processing
   object RawBytecode extends LanguageFunction[DenormClassfile, DenormClassfile] {
     override def process(in: DenormClassfile): EitherNel[String, DenormClassfile] = {
       val expanded = validatedErrToEither(in.expandAttributes(NamedAttributeCompanion.defaults))
@@ -90,27 +90,24 @@ object LanguageFunction {
 
       expanded.map { classfile =>
         val newMethods = classfile.methods.map { m =>
-          val (codeVec, newAttributes) = m.attributes.partition {
-            case _: Code => true
-            case _       => false
+          val codeVec = m.attributes.collect {
+            case c: Code => c
           }
 
           val methodData = if (codeVec.size > 1) {
-            Left[LongMap[NEL[String]], LongMap[DeOPCode]](
-              LongMap(0L -> NEL.one("Found more than one code attribute"))
-            )
+            Left(LongMap(0L -> NEL.one("Found more than one code attribute")))
           } else if (codeVec.size == 1) {
             val Vector(code: Code) = codeVec
             code.denormalizedCode.toEither.leftMap(_.map(t => t._1 -> t._2.map(_.messageWithContext)))
           } else {
-            Right[LongMap[NEL[String]], LongMap[DeOPCode]](LongMap.empty[DeOPCode])
+            Right(LongMap.empty[DeOPCode])
           }
 
           MethodWithData(
             m.accessFlags,
             m.name,
             m.descriptor,
-            newAttributes,
+            m.attributes,
             methodData
           )
         }
@@ -142,215 +139,293 @@ object LanguageFunction {
     ): fansi.Str = Scarlet.printer(out)
   }
 
-  object SIR
-      extends LanguageFunction[ClassfileWithData[Unit, Unit, NEL[String], LongMap[DeOPCode]], ClassfileWithData[
-        Unit,
-        Unit,
-        (NEL[String], SIRCode),
-        SIRCode
-      ]] {
-    override def process(
-        in: ClassfileWithData[Unit, Unit, NEL[String], LongMap[DeOPCode]]
-    ): EitherNel[String, ClassfileWithData[Unit, Unit, (NEL[String], SIRCode), SIRCode]] = {
-      Right(
-        in.fullmapMethod {
-          case Left(e)     => Either.left[(NEL[String], SIRCode), SIRCode]((e, LongMap.empty))
-          case Right(data) => OPCodeToSIR.convert(data, OPCodeCFG.create(data)).leftMap(t => (NEL.one(t._1), t._2))
-        }
-      )
-    }
-
-    override def print(out: ClassfileWithData[Unit, Unit, (NEL[String], SIRCode), SIRCode]): fansi.Str =
-      Scarlet.printer(out)
-  }
-
-  object `SIR-Syntax`
-      extends LanguageFunction[ClassfileWithData[Unit, Unit, NEL[String], SIRCode], ClassfileWithData[
-        Unit,
-        Unit,
-        NEL[String],
-        LongMap[Vector[String]]
-      ]] {
-    override def process(
-        in: ClassfileWithData[Unit, Unit, NEL[String], SIRCode]
-    ): EitherNel[String, ClassfileWithData[Unit, Unit, NEL[String], LongMap[Vector[String]]]] = {
-      Right(in.rightmapMethodWithMethod { (method, code) =>
-        implicit val extra: ir.SIR.SyntaxExtra = ir.SIR.SyntaxExtra(method.attributes.collectFirst {
-          case params: MethodParameters => params
-        })
-        code.map {
-          case (k, StackFrame(_, _, v, _)) =>
-            k -> v.flatMap(ir.SIR.toSyntax)
-        }
-      })
-    }
-
-    override def print(out: ClassfileWithData[Unit, Unit, NEL[String], LongMap[Vector[String]]]): fansi.Str =
-      Scarlet.printer(
-        out.rightmapMethod(code => code.values.flatten.mkString("\n"))
-      )
-  }
-
-  private def cfgDotEdgeTransformer(
-      root: DotRootGraph
-  )(innerEdge: Graph[CFG.CodeBasicBlock, DiEdge]#EdgeT): Option[(DotGraph, DotEdgeStmt)] =
+  private def cfgOPCodeDotEdgeTransformer[A](
+      root: DotRootGraph,
+      labelForNode: A => String
+  )(innerEdge: Graph[A, DiEdge]#EdgeT): Option[(DotGraph, DotEdgeStmt)] = {
     innerEdge.edge match {
       case DiEdge(source, target) =>
         Some(
           (
             root,
             DotEdgeStmt(
-              NodeId(source.value.code.head._1),
-              NodeId(target.value.code.head._1)
+              NodeId(labelForNode(source.value)),
+              NodeId(labelForNode(target.value))
             )
           )
         )
     }
-
-  object `SIR-ClassSyntax`
-      extends LanguageFunction[ClassfileWithData[
-        Unit,
-        Unit,
-        NEL[String],
-        LongMap[Vector[String]]
-      ], ClassfileWithData[
-        Unit,
-        Unit,
-        NEL[String],
-        String
-      ]] {
-    override def process(
-        in: ClassfileWithData[Unit, Unit, NEL[String], LongMap[Vector[String]]]
-    ): EitherNel[String, ClassfileWithData[Unit, Unit, NEL[String], String]] =
-      Right(in.rightmapMethod(_.values.flatten.mkString("\n")))
-
-    override def print(out: ClassfileWithData[Unit, Unit, NEL[String], String]): Str =
-      SimpleClassSyntax.classObjToSyntax(out).syntax
   }
 
-  object `SIR-CFG`
-      extends LanguageFunction[ClassfileWithData[Unit, Unit, NEL[String], SIRCode], ClassfileWithData[
-        Unit,
-        Unit,
-        NEL[String],
-        graph.CFG[graph.CFG.CodeBasicBlock]
-      ]] {
-    override def process(
-        in: ClassfileWithData[Unit, Unit, NEL[String], SIRCode]
-    ): EitherNel[String, ClassfileWithData[Unit, Unit, NEL[String], graph.CFG[graph.CFG.CodeBasicBlock]]] = {
-      Right(
-        in.rightmapMethod { sirCode =>
-          def remapExprJump[B](expr: ir.SIR.Expr[B]): ir.SIR.Expr[B] = expr match {
-            case ir.SIR.Expr.GetStackLocal(index, jumpTarget, tpe) =>
-              ir.SIR.Expr.GetStackLocal(index, jumpTarget * 1000, tpe)
-            case other => other.modifyChildren(FunctionK.lift(remapExprJump))
-          }
-
-          def remapJump(op: ir.SIR): ir.SIR = op match {
-            case ir.SIR.SetStackLocal(index, pc, e) => ir.SIR.SetStackLocal(index, pc * 1000, remapExprJump(e))
-            case ir.SIR.If(expr, branchPC)          => ir.SIR.If(remapExprJump(expr), branchPC * 1000)
-            case ir.SIR.Switch(expr, defaultPC, pairs) =>
-              ir.SIR.Switch(remapExprJump(expr), defaultPC * 1000, pairs.map(t => t._1 -> t._2 * 1000))
-            case ir.SIR.Goto(branchPC) => ir.SIR.Goto(branchPC * 1000)
-            case op                    => op.modifyExpr(FunctionK.lift(remapExprJump))
-          }
-
-          //TODO: Remap better
-          val remaped =
-            sirCode.flatMap(t1 => t1._2.code.zipWithIndex.map(t2 => (t1._1 * 1000 + t2._2) -> remapJump(t2._1)))
-
-          CFG.createFromSIR(remaped)
-        }
-      )
-    }
-
-    override def print(
-        out: ClassfileWithData[Unit, Unit, NEL[String], graph.CFG[graph.CFG.CodeBasicBlock]]
-    ): fansi.Str = {
-      val dotOut = out.rightmapMethod { cfg =>
-        val root = DotRootGraph(directed = true, Some(Id("CodeCFG")))
-
-        def nodeTransformer(innerNode: Graph[CFG.CodeBasicBlock, DiEdge]#NodeT): Option[(DotGraph, DotNodeStmt)] =
-          Some(
-            (
-              root,
-              DotNodeStmt(
-                NodeId(innerNode.value.code.head._1),
-                Seq(
-                  DotAttr(
-                    Id("label"),
-                    Id(innerNode.value.code.map(t => s"${t._1}: ${t._2}").mkString("<", "<BR />", ">"))
-                  )
-                )
+  private def cfgNodeTransformer[A](
+      root: DotRootGraph,
+      nodeId: A => String,
+      nodeStrings: A => Iterable[String]
+  )(innerNode: Graph[A, DiEdge]#NodeT): Option[(DotGraph, DotNodeStmt)] =
+    Some(
+      (
+        root,
+        DotNodeStmt(
+          NodeId(nodeId(innerNode.value)),
+          Seq(
+            DotAttr(
+              Id("label"),
+              Id(
+                nodeStrings(innerNode.value).map(StringEscapeUtils.ESCAPE_HTML4.translate).mkString("<", "<BR />", ">")
               )
             )
           )
+        )
+      )
+    )
 
-        cfg.graph.toDot(root, cfgDotEdgeTransformer(root), cNodeTransformer = Some(nodeTransformer))
+  def sirBlockLabel(block: CFG.SIRBlock): String = block match {
+    case CFG.SIRBlock.SIRCodeBasicBlock(code)               => code.head._1.toString
+    case CFG.SIRBlock.SIRErrorBlock(_, _, _, codeWithStack) => codeWithStack.headOption.fold("<error>")(_._1.toString)
+  }
+
+  def formatErrorLines(map: LongMap[NEL[String]]): String = {
+    map.toVector
+      .flatMap {
+        case (pc, NEL(error, Nil)) => Vector(s"$pc: $error")
+        case (pc, NEL(headError, tailErrors)) =>
+          val pcLength = pc.toString.length
+          s"$pc: $headError" +: tailErrors.map(e => " " * pcLength + s": $e")
       }
+      .mkString("\n")
+  }
+
+  object DenormalizedBytecodeCFG
+      extends LanguageFunction[
+        ClassfileWithData[Unit, Unit, LongMap[NEL[String]], LongMap[DeOPCode]],
+        ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.OPCodeBasicBlock]]
+      ] {
+    override def process(
+        in: ClassfileWithData[Unit, Unit, LongMap[NEL[String]], LongMap[DeOPCode]]
+    ): EitherNel[String, ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.OPCodeBasicBlock]]] =
+      Right(
+        in.rightmapMethodWithMethod { (method, opCode) =>
+          CFG.createFromOPCode(opCode, method.attributes.collectFirst { case code: Code => code })
+        }
+      )
+
+    override def print(out: ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.OPCodeBasicBlock]]): Str = {
+      val dotOut = out
+        .rightmapMethodWithMethod { (method, cfg) =>
+          val root = DotRootGraph(directed = true, Some(Id(method.name)))
+          cfg.graph.toDot(
+            root,
+            edgeTransformer = cfgOPCodeDotEdgeTransformer[CFG.OPCodeBasicBlock](root, _.code.head._1.toString),
+            cNodeTransformer = Some(
+              cfgNodeTransformer[CFG.OPCodeBasicBlock](
+                root,
+                _.code.head._1.toString,
+                _.code.map(t => s"${t._1}: ${t._2}")
+              )
+            )
+          )
+        }
+        .leftmapMethod(formatErrorLines)
 
       Scarlet.printer(dotOut)
     }
   }
 
-  object `SIR-CFG-Syntax`
+  object DenormalizedBytecodeCFGClassSyntax
       extends LanguageFunction[
-        ClassfileWithData[Unit, Unit, NEL[String], graph.CFG[graph.CFG.CodeBasicBlock]],
-        ClassfileWithData[Unit, Unit, NEL[String], String]
+        ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.OPCodeBasicBlock]],
+        ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.OPCodeBasicBlock]]
       ] {
     override def process(
-        in: ClassfileWithData[Unit, Unit, NEL[String], CFG[CFG.CodeBasicBlock]]
-    ): EitherNel[String, ClassfileWithData[Unit, Unit, NEL[String], String]] =
-      Right(
-        in.rightmapMethodWithMethod { (method, cfg) =>
-          val root = DotRootGraph(directed = true, Some(Id("CodeCFG")))
+        in: ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.OPCodeBasicBlock]]
+    ): EitherNel[String, ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.OPCodeBasicBlock]]] = Right(in)
 
-          implicit val extra: ir.SIR.SyntaxExtra = ir.SIR.SyntaxExtra(method.attributes.collectFirst {
-            case params: MethodParameters => params
-          })
+    override def print(out: ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.OPCodeBasicBlock]]): Str = {
+      val dotOut = out.rightmapMethodWithMethod { (method, cfg) =>
+        val root = DotRootGraph(directed = true, Some(Id(method.name)))
+        cfg.graph.toDot(
+          root,
+          edgeTransformer = cfgOPCodeDotEdgeTransformer[CFG.OPCodeBasicBlock](root, _.code.head._1.toString),
+          cNodeTransformer = Some(
+            cfgNodeTransformer[CFG.OPCodeBasicBlock](
+              root,
+              _.code.head._1.toString,
+              _.code.map(t => s"${t._1}: ${t._2}")
+            )
+          )
+        )
+      }
 
-          def nodeTransformer(innerNode: Graph[CFG.CodeBasicBlock, DiEdge]#NodeT): Option[(DotGraph, DotNodeStmt)] =
-            Some(
-              (
+      SimpleClassSyntax.classObjToSyntax(dotOut).syntax
+    }
+  }
+
+  object `SIR-CFG`
+      extends LanguageFunction[
+        ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.OPCodeBasicBlock]],
+        ClassfileWithData[
+          Unit,
+          Unit,
+          LongMap[NEL[String]],
+          CFG[CFG.SIRBlock]
+        ]
+      ] {
+    override def process(
+        in: ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.OPCodeBasicBlock]]
+    ): EitherNel[String, ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.SIRBlock]]] =
+      Right(in.rightmapMethod(OPCodeToSIR.convert))
+
+    override def print(out: ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.SIRBlock]]): fansi.Str = {
+      val dotOut = out
+        .rightmapMethodWithMethod { (method, cfg) =>
+          val root = DotRootGraph(directed = true, Some(Id(method.name)))
+
+          cfg.graph.toDot(
+            root,
+            cfgOPCodeDotEdgeTransformer[CFG.SIRBlock](root, sirBlockLabel),
+            cNodeTransformer = Some(
+              cfgNodeTransformer(
                 root,
-                DotNodeStmt(
-                  NodeId(innerNode.value.code.head._1),
-                  Seq(
-                    DotAttr(
-                      Id("label"),
-                      Id(
-                        innerNode.value.code
-                          .flatMap(t => ir.SIR.toSyntax(t._2))
-                          .map(StringEscapeUtils.escapeHtml4)
-                          .mkString("<", "<BR />", ">")
-                      )
-                    ),
-                    DotAttr(
-                      Id("xlabel"),
-                      Id(innerNode.value.code.head._1)
-                    )
-                  )
-                )
+                sirBlockLabel,
+                {
+                  case CFG.SIRBlock.SIRCodeBasicBlock(code) =>
+                    code.toVector.flatMap {
+                      case (pc, Vector(oneOp)) => Vector(s"$pc: $oneOp")
+                      case (pc, Vector(headOp, tailOps @ _*)) =>
+                        val pcLength = pc.toString.length
+                        s"$pc: $headOp" +: tailOps.map(op => " " * pcLength + s": $op")
+                    }
+                  case CFG.SIRBlock.SIRErrorBlock(pc, error, op, codeWithStack) =>
+                    codeWithStack.map {
+                      case (pc, StackFrame(before, _, code, after)) =>
+                        s"$pc: $code // Stack before: ${before.mkString(", ")} Stack after: ${after.mkString(", ")}"
+                    }.toVector :+ s"$pc: $op //$error"
+                }
               )
             )
-
-          cfg.graph.toDot(root, cfgDotEdgeTransformer(root), cNodeTransformer = Some(nodeTransformer))
+          )
         }
-      )
+        .leftmapMethod(formatErrorLines)
 
-    override def print(out: ClassfileWithData[Unit, Unit, NEL[String], String]): Str =
-      Scarlet.printer(out)
+      Scarlet.printer(dotOut)
+    }
+  }
+
+  def syntaxCode(pc: Long, code: Vector[SIR])(implicit syntaxExtra: SIR.SyntaxExtra): Vector[String] = {
+    val lines = code.flatMap(SIR.toSyntax)
+    lines match {
+      case Vector()    => Vector()
+      case Vector(one) => Vector(s"$pc: $one")
+      case Vector(head, tail @ _*) =>
+        s"$pc: $head" +: tail.toVector.map(line => " " * pc.toString.length + s": $line")
+    }
+  }
+
+  def errorSyntaxCode(pc: Long, frame: StackFrame)(implicit syntaxExtra: SIR.SyntaxExtra): Vector[String] = {
+    val lines       = SIR.toSyntax(frame.code)
+    val stackBefore = s"Stack before: ${frame.before.mkString(", ")}"
+    val stackAfter  = s" Stack after: ${frame.after.mkString(", ")}"
+    lines match {
+      case Nil        => Vector()
+      case one :: Nil => Vector(s"$pc: $one //$stackBefore $stackAfter")
+      case head :: tail =>
+        s"// $stackBefore" +: s"$pc: $head" +: tail.toVector.map(line =>
+          " " * pc.toString.length + s": $line"
+        ) :+ s"// $stackAfter"
+    }
   }
 
   object `SIR-CFG-ClassSyntax`
       extends LanguageFunction[
-        ClassfileWithData[Unit, Unit, NEL[String], String],
-        ClassfileWithData[Unit, Unit, NEL[String], String]
+        ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.SIRBlock]],
+        ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.SIRBlock]]
       ] {
     override def process(
-        in: ClassfileWithData[Unit, Unit, NEL[String], String]
-    ): EitherNel[String, ClassfileWithData[Unit, Unit, NEL[String], String]] = Right(in)
+        in: ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.SIRBlock]]
+    ): EitherNel[String, ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.SIRBlock]]] = Right(in)
 
-    override def print(out: ClassfileWithData[Unit, Unit, NEL[String], String]): Str = SimpleClassSyntax.classObjToSyntax(out).syntax
+    override def print(out: ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.SIRBlock]]): Str = {
+      val dotOut = out.rightmapMethodWithMethod { (method, cfg) =>
+        val root                                  = DotRootGraph(directed = true, Some(Id(method.name)))
+        implicit val syntaxExtra: SIR.SyntaxExtra = SIR.SyntaxExtra.fromAttributes(method.attributes)
+
+        cfg.graph.toDot(
+          root,
+          cfgOPCodeDotEdgeTransformer[CFG.SIRBlock](root, sirBlockLabel),
+          cNodeTransformer = Some(
+            cfgNodeTransformer(
+              root,
+              sirBlockLabel,
+              {
+                case CFG.SIRBlock.SIRCodeBasicBlock(code) =>
+                  code.toVector.flatMap {
+                    case (pc, code) => syntaxCode(pc, code)
+                  }
+                case CFG.SIRBlock.SIRErrorBlock(pc, error, op, codeWithStack) =>
+                  codeWithStack.flatMap {
+                    case (pc, frame) => errorSyntaxCode(pc, frame)
+                  }.toVector :+ s"$pc: $op //$error"
+              }
+            )
+          )
+        )
+      }
+
+      SimpleClassSyntax.classObjToSyntax(dotOut).syntax
+    }
+  }
+
+  type SIRClassSyntax = Either[Either[(DeOPCode, String), StackFrame], Vector[SIR]]
+  object `SIR-ClassSyntax`
+      extends LanguageFunction[ClassfileWithData[
+        Unit,
+        Unit,
+        LongMap[NEL[String]],
+        CFG[CFG.SIRBlock]
+      ], ClassfileWithData[
+        Unit,
+        Unit,
+        LongMap[NEL[String]],
+        LongMap[SIRClassSyntax]
+      ]] {
+    override def process(
+        in: ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.SIRBlock]]
+    ): EitherNel[String, ClassfileWithData[Unit, Unit, LongMap[NEL[String]], LongMap[SIRClassSyntax]]] = {
+      Right(
+        in.rightmapMethod(cfg =>
+          cfg.graph.nodes
+            .map(_.value match {
+              case CFG.SIRBlock.SIRCodeBasicBlock(code) => Right(code.to(LongMap))
+              case CFG.SIRBlock.SIRErrorBlock(pc, error, op, codeWithStack) =>
+                Left(
+                  codeWithStack.transform((_, f) => Right(f)).updated(pc, Left((op, error)))
+                )
+            })
+            .foldLeft(LongMap.empty[SIRClassSyntax]) {
+              case (acc, Right(normalMap)) => acc ++ normalMap.transform((_, v) => Right(v))
+              case (acc, Left(errorMap))   => acc ++ errorMap.transform((_, v) => Left(v))
+            }
+        )
+      )
+    }
+
+    override def print(
+        out: ClassfileWithData[Unit, Unit, LongMap[NEL[String]], LongMap[SIRClassSyntax]]
+    ): Str = {
+      val stringOut = out.rightmapMethodWithMethod { (method, sirCode) =>
+        implicit val syntaxExtra: SIR.SyntaxExtra = SIR.SyntaxExtra.fromAttributes(method.attributes)
+
+        sirCode.toVector.flatMap {
+          case (pc, v) =>
+            v match {
+              case Right(code)             => syntaxCode(pc, code)
+              case Left(Right(frame))      => errorSyntaxCode(pc, frame)
+              case Left(Left((op, error))) => Vector(s"$pc: $op // $error")
+            }
+        }
+      }
+
+      SimpleClassSyntax.classObjToSyntax(stringOut).syntax
+    }
   }
 }

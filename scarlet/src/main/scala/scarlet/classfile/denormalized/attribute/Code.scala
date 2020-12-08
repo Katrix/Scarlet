@@ -70,6 +70,7 @@ object Code extends NamedAttributeCompanion[Code] {
                   .bimap(es => NonEmptyList.one(address -> es), address -> _)
             }
 
+            //TODO: Remap other attributes as well, or include it in the attribute
             val addrSubst = LongMap(v.keys.zipWithIndex.map(t => t._1 -> t._2.toLong).toSeq: _*)
             def getNewAddress(address: Long): Long =
               addrSubst(address.toShort)

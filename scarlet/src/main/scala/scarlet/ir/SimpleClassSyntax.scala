@@ -132,7 +132,7 @@ object SimpleClassSyntax {
               val tpe = signatureToType(referenceTypeSignature)
 
               val (lo, hi) = indicator match {
-                case Signature.WildcardIndicator.Plus => (None, Some(tpe))
+                case Signature.WildcardIndicator.Plus  => (None, Some(tpe))
                 case Signature.WildcardIndicator.Minus => (Some(tpe), None)
               }
 
@@ -226,7 +226,7 @@ object SimpleClassSyntax {
   }
 
   def dataToString(data: Either[_, _]): Term = data match {
-    case Right(value) => Term.Block(List(Lit.String(formatData(value)), q"???"))
+    case Right(value) => Term.Block(List(q"${Lit.String(formatData(value))}.stripMargin", q"???"))
     case Left(value)  => Term.Block(List(Lit.String("Error: \n" + formatData(value)), q"???"))
   }
 
@@ -237,7 +237,7 @@ object SimpleClassSyntax {
       case _           => data.toString.split("\n").toVector
     }
 
-    lines.mkString("\n" + "  " * 2 + "|", "\n" + "  " * 2 + "|", "")
+    lines.mkString("|", "\n" + "  " * 2 + "   |", "")
   }
 
   def classObjToSyntax[FE, FA, ME, MA](
@@ -334,21 +334,25 @@ object SimpleClassSyntax {
 
       val throwsMods = throwsTypes.map(tpe => mod"@throws[$tpe]")
 
+      val syntaxExtra = SIR.SyntaxExtra.fromAttributes(method.attributes)
+
       val paramAnnotations =
         paramterAnnotationsFromAttributes(method.attributes).getOrElse(Vector.fill(paramTypes.length)(Vector.empty))
-      val params = paramTypes.zip(Vector.fill(paramTypes.length)(None)).zip(paramAnnotations).zipWithIndex.map {
-        case (((tpe, paramInfo), annotations), i) =>
-          val mods = annotations //++ ???
+      val params = paramTypes
+        .zip(Vector.tabulate(paramTypes.length)(i => syntaxExtra.getVariableName(i + 1)))
+        .zip(paramAnnotations)
+        .zipWithIndex
+        .map {
+          case (((tpe, varName), annotations), i) =>
+            val mods = annotations //++ ???
 
-          val name = paramInfo.map(_ => ???).getOrElse(s"x$i")
-
-          Term.Param(
-            mods.toList,
-            Term.Name(name),
-            Some(tpe),
-            None
-          )
-      }
+            Term.Param(
+              mods.toList,
+              Term.Name(varName),
+              Some(tpe),
+              None
+            )
+        }
 
       Defn.Def(
         (accessMods ++ annotationMods ++ throwsMods).toList,

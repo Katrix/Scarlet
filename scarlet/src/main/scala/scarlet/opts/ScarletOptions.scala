@@ -12,7 +12,7 @@ import cats.instances.vector._
 case class ScarletOptions(
     inputFiles: Seq[Path] = Nil,
     outputFolder: Option[Path] = None,
-    language: ScarletLanguage[_] = ScarletLanguage.SIR
+    language: ScarletLanguage[_] = ScarletLanguage.SIRClassSyntax
 )
 object ScarletOptions {
   val parser: OParser[Unit, ScarletOptions] = {

@@ -1,33 +1,84 @@
 package scarlet.ir
 
-import cats.arrow.FunctionK
+import cats.{Applicative, Monad}
+import cats.syntax.all._
 import scarlet.classfile.denormalized.ConstantPoolEntry.{ClassInfo, FieldRefInfo}
 import scarlet.classfile.denormalized.Descriptor
-import scarlet.classfile.denormalized.attribute.MethodParameters
+import scarlet.classfile.denormalized.attribute.{Attribute, LocalVariableTable, MethodParameters}
 import scarlet.classfile.denormalized.opcodes.OPCode
 import scarlet.ir.SIR.Expr
+import perspective._
 
 import scala.annotation.tailrec
+import scala.collection.immutable.TreeMap
 
 /**
   * A stackless IR to help with not having to deal with the stack further into
   * the decompiler.
   *
   * Based on this paper: http://people.irisa.fr/David.Pichardie/papers/aplas10.pdf
+  *
+  * We do make a few big changes away from that paper though. The first is that
+  * anything that reads from a mutable value assigns a new temp var, which is
+  * what we push to the stack instead. This removes the need for substitution
+  * when a mutable value is set after we have read it to the stack, but not used
+  * it yet.
   */
 sealed trait SIR {
 
   /**
-    * Substitute the target with a new expression, for all the expressions this instruction stores.
+    * Modify the direct expressions of this OPCode while maintaining some state.
     */
-  def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR = this
+  def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, Expr, *]): G[SIR] = (this: SIR).pure[G]
 
   /**
-    * Modify the expressions this OPCode contains.
+    * Modify the expressions of this OPCode while maintaining some state.
     */
-  def modifyExpr(f: FunctionK[Expr, Expr]): SIR = this
+  def monoTraverseDeep[G[_]: Monad](f: Expr ~>: Compose2[G, Expr, *]): G[SIR] = {
+    lazy val deepTraverser: Expr ~>: Compose2[G, Expr, *] = new (Expr ~>: Compose2[G, Expr, *]) {
+      override def apply[Z](expr: Expr[Z]): Compose2[G, Expr, Z] =
+        expr.monoTraverse(deepTraverser).flatMap(e => f(e))
+    }
+
+    monoTraverse(deepTraverser)
+  }
+
+  /**
+    * Fold the expressions this OPCode contains directly
+    */
+  def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B = base
+
+  /**
+    * Fold the expressions this OPCode contains
+    */
+  def monoFoldLeft[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B = {
+    lazy val deepFolder: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *] =
+      new (Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]) {
+        override def apply[Z](fa: (Const[B, Z], Expr[Z])): Const[B, Z] = {
+          val b1   = fa._1
+          val expr = fa._2
+
+          val b2 = expr.monoFoldLeftShallow(b1)(deepFolder)
+
+          f((b2, expr))
+        }
+      }
+
+    monoFoldLeftShallow(base)(deepFolder)
+  }
 }
 object SIR {
+
+  /**
+    * Structured SIR. Contains no codes for jumps
+    */
+  sealed trait SSIR extends SIR
+
+  class TempVar(val index: Int) extends AnyVal {
+    def inc: TempVar = new TempVar(index + 1)
+
+    override def toString: String = index.toString
+  }
 
   /**
     * Unlike the expressions in the referenced paper, we do quite a bit of
@@ -64,7 +115,7 @@ object SIR {
 
     case object String                   extends BaseType[Predef.String]("String")
     case object Class                    extends BaseType[Predef.String]("Class")
-    case class Ref(classInfo: ClassInfo) extends BaseType[scala.AnyRef](classInfo.name)
+    case class Ref(classInfo: ClassInfo) extends BaseType[scala.AnyRef](classInfo.name.replace('/', '.'))
 
     case class Array[A](tpe: Type.Aux[A]) extends BaseType[scala.Array[A]](s"Array[${tpe.describe}]") {
       override def isSupertypeOf(tpe: Type): Boolean = tpe match {
@@ -159,17 +210,95 @@ object SIR {
       * @param newExpr The new expression to use if this was equal to the target.
       */
     def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-      if (target == this) newExpr.asInstanceOf[Expr[A]] else this
+      if (target == this) newExpr.asInstanceOf[Expr[A]]
+      else monoMap(Lambda[Expr ~>: Expr](_.substitute(target, newExpr)))
 
     /**
-      * Modify the child expressions this expression contains.
+      * Modify this expressions children.
       */
-    def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] = this
+    def monoMap(f: Expr ~>: Expr): Expr[A] = monoTraverse[cats.Id](f)
+
+    /**
+      * Fold this expression's direct children
+      */
+    def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B = base
+
+    /**
+      * Fold this expression's children
+      */
+    def monoFoldLeft[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B = {
+      lazy val deepFolder: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *] =
+        new (Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]) {
+          override def apply[Z](fa: (Const[B, Z], Expr[Z])): Const[B, Z] = {
+            val b1   = fa._1
+            val expr = fa._2
+
+            val b2 = expr.monoFoldLeftShallow(b1)(deepFolder)
+
+            f((b2, expr))
+          }
+        }
+
+      monoFoldLeftShallow(base)(deepFolder)
+    }
+
+    /**
+      * Modify this expression's direct children while maintaining some state.
+      */
+    def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, Expr, *]): G[Expr[A]] =
+      (this: Expr[A]).pure[G]
+
+    /**
+      * Modify this expression's direct children while maintaining some state.
+      */
+    def monoTraverseDeep[G[_]: Monad](f: Expr ~>: Compose2[G, Expr, *]): G[Expr[A]] = {
+      lazy val deepTraverser: Expr ~>: Compose2[G, Expr, *] = new (Expr ~>: Compose2[G, Expr, *]) {
+        override def apply[Z](expr: Expr[Z]): Compose2[G, Expr, Z] =
+          expr.monoTraverse(deepTraverser).flatMap(e => f(e))
+      }
+
+      monoTraverse(deepTraverser)
+    }
+
+    /**
+      * If this expression contains the target
+      */
+    def contains(target: Expr[_]): Boolean =
+      target == this || monoFoldLeftShallow(false)(
+        Lambda[Tuple2K[Const[Boolean, *], Expr, *] ~>: Const[Boolean, *]](fa => fa._1 || fa._2 == target)
+      )
+  }
+  sealed abstract class BinaryOp(val symbol: String)
+  object BinaryOp {
+    case object Add                                     extends BinaryOp("+")
+    case object Sub                                     extends BinaryOp("-")
+    case object Mul                                     extends BinaryOp("*")
+    case object Div                                     extends BinaryOp("/")
+    case object Rem                                     extends BinaryOp("%")
+    case object ShiftLeft                               extends BinaryOp("<<")
+    case object ShiftRight                              extends BinaryOp(">>")
+    case object LogShiftRight                           extends BinaryOp(">>>")
+    case object And                                     extends BinaryOp("&")
+    case object Or                                      extends BinaryOp("|")
+    case object Xor                                     extends BinaryOp("^")
+    case object Equal                                   extends BinaryOp("==")
+    case object NotEqual                                extends BinaryOp("!=")
+    case object LT                                      extends BinaryOp("<")
+    case object LE                                      extends BinaryOp("<=")
+    case object GE                                      extends BinaryOp(">=")
+    case object GT                                      extends BinaryOp(">")
+    case class Compare(nanBehavior: OPCode.NanBehavior) extends BinaryOp(s"compare($nanBehavior)")
+  }
+  sealed abstract class UnaryOp(val symbol: String)
+  object UnaryOp {
+    case object Not extends UnaryOp("!")
+    case object Neg extends UnaryOp("-")
   }
   object Expr {
     case class UninitializedRef(atAddress: Long, classInfo: ClassInfo) extends Expr[AnyRef] {
-      override def tpe: Type.Aux[AnyRef]                               = Type.Ref(classInfo)
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"error: uninitialized class ${classInfo.name}"
+      override def tpe: Type.Aux[AnyRef] = Type.Ref(classInfo)
+      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String =
+        s"error: uninitialized class ${classInfo.name.replace('.', '/')}"
     }
 
     case class ConstTpe[A](tpe: Type.Aux[A], value: A) extends Expr[A] {
@@ -181,319 +310,198 @@ object SIR {
       override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = "null"
     }
 
-    case class Add[A](e1: Expr[A], e2: Expr[A]) extends Expr[A] {
-      override def tpe: Type.Aux[A]                                    = e1.tpe
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} + ${e2.toSyntax})"
+    case class BinaryExpr[A](e1: Expr[_], e2: Expr[_], op: BinaryOp, tpe: Type.Aux[A]) extends Expr[A] {
+      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} ${op.symbol} ${e2.toSyntax})"
 
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else Add(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
+      override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B = {
+        val b0 = base
+        val b1 = f((b0, e1))
+        val b2 = f((b1, e2))
+        b2
+      }
 
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        Add(f(e1), f(e2))
-    }
-    case class Sub[A](e1: Expr[A], e2: Expr[A]) extends Expr[A] {
-      override def tpe: Type.Aux[A]                                    = e1.tpe
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} - ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else Sub(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        Sub(f(e1), f(e2))
-    }
-    case class Mult[A](e1: Expr[A], e2: Expr[A]) extends Expr[A] {
-      override def tpe: Type.Aux[A]                                    = e1.tpe
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} * ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else Mult(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        Mult(f(e1), f(e2))
-    }
-    case class Div[A](e1: Expr[A], e2: Expr[A]) extends Expr[A] {
-      override def tpe: Type.Aux[A]                                    = e1.tpe
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} / ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else Div(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        Div(f(e1), f(e2))
-    }
-    case class Rem[A](e1: Expr[A], e2: Expr[A]) extends Expr[A] {
-      override def tpe: Type.Aux[A]                                    = e1.tpe
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} % ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else Rem(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        Rem(f(e1), f(e2))
-    }
-    case class Neg[A](e: Expr[A]) extends Expr[A] {
-      override def tpe: Type.Aux[A]                                    = e.tpe
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(-${e.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else Neg(e.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        Neg(f(e))
-    }
-    case class ShiftLeft[A](e1: Expr[A], e2: Expr[Int]) extends Expr[A] {
-      override def tpe: Type.Aux[A]                                    = e1.tpe
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} << ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else ShiftLeft(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        ShiftLeft(f(e1), f(e2))
+      override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[Expr[A]] =
+        (f(e1), f(e2)).mapN(BinaryExpr(_, _, op, tpe))
     }
 
-    case class ShiftRight[A](e1: Expr[A], e2: Expr[Int]) extends Expr[A] {
-      override def tpe: Type.Aux[A]                                    = e1.tpe
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} >> ${e2.toSyntax})"
+    case class UnaryExpr[A](e: Expr[_], op: UnaryOp, tpe: Type.Aux[A]) extends Expr[A] {
+      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"${op.symbol}(${e.toSyntax})"
 
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else ShiftRight(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
+      override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B =
+        f((base, e))
 
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        ShiftRight(f(e1), f(e2))
-    }
-    case class LogShiftRight[A](e1: Expr[A], e2: Expr[Int]) extends Expr[A] {
-      override def tpe: Type.Aux[A]                                    = e1.tpe
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} >>> ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else LogShiftRight(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        LogShiftRight(f(e1), f(e2))
-    }
-
-    case class And[A](e1: Expr[A], e2: Expr[A]) extends Expr[A] {
-      override def tpe: Type.Aux[A]                                    = e1.tpe
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} & ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else And(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        And(f(e1), f(e2))
-    }
-    case class Or[A](e1: Expr[A], e2: Expr[A]) extends Expr[A] {
-      override def tpe: Type.Aux[A]                                    = e1.tpe
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} | ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else Or(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        Or(f(e1), f(e2))
-    }
-    case class Xor[A](e1: Expr[A], e2: Expr[A]) extends Expr[A] {
-      override def tpe: Type.Aux[A]                                    = e1.tpe
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} ^ ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else Xor(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        Xor(f(e1), f(e2))
-    }
-
-    case class Eq[A](e1: Expr[A], e2: Expr[A]) extends Expr[Boolean] {
-      override def tpe: Type.Aux[Boolean]                              = Type.Boolean
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} == ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[Boolean] =
-        if (this == target) newExpr.asInstanceOf[Expr[Boolean]]
-        else Eq(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[Boolean] =
-        Eq(f(e1), f(e2))
-    }
-    case class Not(e: Expr[Boolean]) extends Expr[Boolean] {
-      override def tpe: Type.Aux[Boolean]                              = Type.Boolean
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"!(${e.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[Boolean] =
-        if (this == target) newExpr.asInstanceOf[Expr[Boolean]]
-        else Not(e.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[Boolean] =
-        Not(f(e))
-    }
-    case class LT(e1: Expr[Int], e2: Expr[Int]) extends Expr[Boolean] {
-      override def tpe: Type.Aux[Boolean]                              = Type.Boolean
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} < ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[Boolean] =
-        if (this == target) newExpr.asInstanceOf[Expr[Boolean]]
-        else LT(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[Boolean] =
-        LT(f(e1), f(e2))
-    }
-    case class GE(e1: Expr[Int], e2: Expr[Int]) extends Expr[Boolean] {
-      override def tpe: Type.Aux[Boolean]                              = Type.Boolean
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} >= ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[Boolean] =
-        if (this == target) newExpr.asInstanceOf[Expr[Boolean]]
-        else GE(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[Boolean] =
-        GE(f(e1), f(e2))
-    }
-    case class GT(e1: Expr[Int], e2: Expr[Int]) extends Expr[Boolean] {
-      override def tpe: Type.Aux[Boolean]                              = Type.Boolean
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} > ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[Boolean] =
-        if (this == target) newExpr.asInstanceOf[Expr[Boolean]]
-        else GT(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[Boolean] =
-        GE(f(e1), f(e2))
-    }
-    case class LE(e1: Expr[Int], e2: Expr[Int]) extends Expr[Boolean] {
-      override def tpe: Type.Aux[Boolean]                              = Type.Boolean
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(${e1.toSyntax} <= ${e2.toSyntax})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[Boolean] =
-        if (this == target) newExpr.asInstanceOf[Expr[Boolean]]
-        else LE(e1.substitute(target, newExpr), e2.substitute(target, newExpr))
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[Boolean] =
-        LE(f(e1), f(e2))
+      override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[Expr[A]] =
+        f(e).map(UnaryExpr(_, op, tpe))
     }
 
     case class Convert[A](e: Expr[_], to: Type.Aux[A]) extends Expr[A] {
       override def tpe: Type.Aux[A]                                    = to
       override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"${e.toSyntax}.asInstanceOf[${to.describe}]"
 
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else Convert(e.substitute(target, newExpr), to)
+      override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B =
+        f((base, e))
 
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        Convert(f(e), to)
+      override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[Expr[A]] =
+        f(e).map(Convert(_, to))
     }
 
-    case class Compare[A](e1: Expr[A], e2: Expr[A], nanBehavior: OPCode.NanBehavior) extends Expr[Int] {
-      override def tpe: Type.Aux[Int] = Type.Int
-
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String =
-        s"${e1.toSyntax}.compare(${e2.toSyntax})" //TODO: Account for nan behavior
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[Int] =
-        if (this == target) newExpr.asInstanceOf[Expr[Int]]
-        else Compare(e1.substitute(target, newExpr), e2.substitute(target, newExpr), nanBehavior)
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[Int] =
-        Compare(f(e1), f(e2), nanBehavior)
-    }
-
-    case class GetLocal[A](index: Int, tpe: Type.Aux[A]) extends Expr[A] {
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = {
-        if (index == 0) "this"
-        else
-          syntaxExtra.methodParams.flatMap(_.parameters.lift(index - 1)).flatMap(_.name) match {
-            case Some(name) => s"($name: ${tpe.describe})"
-            case None       => s"(var_$index: ${tpe.describe})"
-          }
-      }
-    }
-    case class GetFakeLocal[A](index: Int, tpe: Type.Aux[A]) extends Expr[A] {
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(local_$index: ${tpe.describe})"
+    case class GetFakeLocal[A](tempVar: TempVar, tpe: Type.Aux[A]) extends Expr[A] {
+      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(local_${tempVar.index}: ${tpe.describe})"
     }
     case class GetStackLocal[A](index: Int, jumpTarget: Long, tpe: Type.Aux[A]) extends Expr[A] {
       override def toSyntax(implicit syntaxExtra: SyntaxExtra): String =
         s"(stack_${index}_$jumpTarget: ${tpe.describe})"
     }
-    case class GetField(e: Expr[_], fieldRefInfo: FieldRefInfo) extends Expr[Any] {
-      override def tpe: Type.Aux[Any] =
-        Type.fromDescriptor(fieldRefInfo.nameAndType.descriptor).asInstanceOf[Type.Aux[Any]]
 
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String =
-        s"(${e.toSyntax}.${fieldRefInfo.nameAndType.name}: ${tpe.describe})"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[Any] =
-        if (this == target) newExpr.asInstanceOf[Expr[Any]]
-        else GetField(e.substitute(target, newExpr), fieldRefInfo)
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[Any] =
-        GetField(f(e), fieldRefInfo)
-    }
-    case class GetStatic(fieldRefInfo: FieldRefInfo) extends Expr[Any] {
-      override def tpe: Type.Aux[Any] =
-        Type.fromDescriptor(fieldRefInfo.nameAndType.descriptor).asInstanceOf[Type.Aux[Any]]
-
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String =
-        s"(${fieldRefInfo.clazz.name}.${fieldRefInfo.nameAndType.name}: ${tpe.describe})"
-    }
-
-    case class Cast(e: Expr[_], classInfo: ClassInfo) extends Expr[AnyRef] {
-      override def tpe: Type.Aux[AnyRef]                               = Type.Ref(classInfo)
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"${e.toSyntax}.asInstanceOf[${tpe.describe}]"
-
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[AnyRef] =
-        if (this == target) newExpr.asInstanceOf[Expr[AnyRef]]
-        else Cast(e.substitute(target, newExpr), classInfo)
-
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[AnyRef] =
-        Cast(f(e), classInfo)
-    }
-
-    case class IsInstanceOf(e: Expr[_], classInfo: ClassInfo) extends Expr[Int] {
-      override def tpe: Type.Aux[Int]                                  = Type.Int
+    case class IsInstanceOf(e: Expr[_], classInfo: ClassInfo) extends Expr[Boolean] {
+      override def tpe: Type.Aux[Boolean]                              = Type.Boolean
       override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"${e.toSyntax}.isInstanceOf[${tpe.describe}]"
 
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[Int] =
-        if (this == target) newExpr.asInstanceOf[Expr[Int]]
-        else IsInstanceOf(e.substitute(target, newExpr), classInfo)
+      override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B =
+        f((base, e))
 
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[Int] =
-        IsInstanceOf(f(e), classInfo)
+      override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[Expr[Boolean]] =
+        f(e).map(IsInstanceOf(_, classInfo))
     }
 
     case class ArrayLength(e: Expr[Array[_]]) extends Expr[Int] {
       override def tpe: Type.Aux[Int]                                  = Type.Int
       override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"${e.toSyntax}.length"
 
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[Int] =
-        if (this == target) newExpr.asInstanceOf[Expr[Int]]
-        else ArrayLength(e.substitute(target, newExpr))
+      override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B =
+        f((base, e))
 
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[Int] =
-        ArrayLength(f(e))
+      override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[Expr[Int]] =
+        f(e).map(ArrayLength)
     }
 
-    case class GetArray[A](e: Expr[Array[A]], idx: Expr[Int], tpe: Type.Aux[A]) extends Expr[A] {
+    case class GetLocal(index: Int) extends Expr[Nothing] {
+      override def tpe: Type.Aux[Nothing] = Type.Unknown
+
       override def toSyntax(implicit syntaxExtra: SyntaxExtra): String =
-        s"(${e.toSyntax}[${idx.toSyntax}]: ${tpe.describe})"
+        syntaxExtra.getVariableName(index)
+    }
 
-      override def substitute[B](target: Expr[B], newExpr: Expr[B]): Expr[A] =
-        if (this == target) newExpr.asInstanceOf[Expr[A]]
-        else GetArray(e.substitute(target, newExpr), idx.substitute(target, newExpr), tpe)
+    case class GetArray[A](arr: Expr[Array[A]], idx: Expr[Int]) extends Expr[A] {
+      override def tpe: Type.Aux[A] = arr.tpe match {
+        case Type.Array(tpe) => tpe
+        case _               => Type.Unknown.asInstanceOf[Type.Aux[A]]
+      }
 
-      override def modifyChildren(f: FunctionK[Expr, Expr]): Expr[A] =
-        GetArray(f(e), f(idx), tpe)
+      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"${arr.toSyntax}[${idx.toSyntax}]"
+
+      override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B = {
+        val b0 = base
+        val b1 = f((b0, arr))
+        val b2 = f((b1, idx))
+        b2
+      }
+
+      override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[Expr[A]] =
+        (f(arr), f(idx)).mapN(GetArray(_, _))
+    }
+
+    case class GetField[E](e: Expr[E], fieldRefInfo: FieldRefInfo) extends Expr[Nothing] {
+      override def tpe: Type.Aux[Nothing] = Type.Unknown
+
+      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String =
+        s"${e.toSyntax}.${fieldRefInfo.nameAndType.name}"
+
+      override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B =
+        f((base, e))
+
+      override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[Expr[Nothing]] =
+        f(e).map(GetField(_, fieldRefInfo))
+    }
+
+    case class GetStatic(fieldRefInfo: FieldRefInfo) extends Expr[Nothing] {
+      override def tpe: Type.Aux[Nothing] = Type.Unknown
+
+      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String =
+        s"${fieldRefInfo.clazz.name.replace('/', '.')}.${fieldRefInfo.nameAndType.name}"
+    }
+
+    case class New(clazz: ClassInfo, variables: Seq[Expr[_]]) extends Expr[scala.AnyRef] {
+      override def tpe: Type.Aux[scala.AnyRef] = Type.Ref(clazz)
+
+      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String =
+        s"new ${clazz.name.replace('/', '.')}(${variables.map(_.toSyntax).mkString(", ")})"
+
+      override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B =
+        variables.foldLeft(base)((b, expr) => f((b, expr)))
+
+      override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[Expr[AnyRef]] =
+        variables.toVector.traverse[G, Expr[Any]](e => f(e.asInstanceOf[Expr[Any]])).map(New(clazz, _))
+    }
+
+    case class Call(
+        callType: CallType,
+        clazz: ClassInfo,
+        name: String,
+        descriptor: Descriptor.MethodDescriptor,
+        obj: Option[Expr[_]],
+        variables: Seq[Expr[_]]
+    ) extends Expr[Nothing] {
+      override def tpe: Type.Aux[Nothing] = Type.fromDescriptor(descriptor).asInstanceOf[Type.Aux[Nothing]]
+
+      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String =
+        obj match {
+          case None      => s"${clazz.name.replace('/', '.')}.$name(${variables.map(_.toSyntax).mkString(", ")})"
+          case Some(obj) => s"${obj.toSyntax}.$name(${variables.map(_.toSyntax).mkString(", ")})"
+        }
+
+      override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B = {
+        val b1 = obj.fold(base)(e => f((base, e)))
+        variables.foldLeft(b1)((b, e) => f((b, e)))
+      }
+
+      override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[Expr[Nothing]] = {
+        val g1 = obj.traverse[G, Expr[Any]](e => f(e.asInstanceOf[Expr[Any]]))
+        val g2 = variables.toVector.traverse[G, Expr[Any]](e => f(e.asInstanceOf[Expr[Any]]))
+
+        (g1, g2).mapN(Call(callType, clazz, name, descriptor, _, _))
+      }
+    }
+    case class NewArray[A](size: Expr[Int], arrTpe: Type.Aux[A]) extends Expr[Array[A]] {
+      override def tpe: Type.Aux[Array[A]] = Type.Array(arrTpe)
+
+      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String =
+        s"new ${arrTpe.describe}[${size.toSyntax}]"
+
+      override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B =
+        f((base, size))
+
+      override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[Expr[Array[A]]] =
+        f(size).map(NewArray(_, arrTpe))
+    }
+    case class NewMultiArray(tpe: Type.Aux[Array[_]], sizesExpr: Vector[Expr[Int]]) extends Expr[Array[_]] {
+      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = {
+        @tailrec
+        def underlyingTpe(tpe: Type.Aux[_]): Type = tpe match {
+          case Type.Array(inner) => underlyingTpe(inner)
+          case _                 => tpe
+        }
+
+        val dimensionsBrackets = sizesExpr.map(e => s"[${e.toSyntax}]").mkString
+
+        s"new ${underlyingTpe(tpe).describe}$dimensionsBrackets"
+      }
+
+      override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B =
+        sizesExpr.foldLeft(base)((b, expr) => f((b, expr)))
+
+      override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[Expr[Array[_]]] =
+        sizesExpr.traverse[G, Expr[Int]](e => f(e)).map(NewMultiArray(tpe, _))
+    }
+    case class Cast[A, E](e: Expr[E], tpe: Type.Aux[A]) extends Expr[A] {
+      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String =
+        s"${e.toSyntax}.asInstanceOf[${tpe.describe}]"
+
+      override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B =
+        f((base, e))
+
+      override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[Expr[A]] =
+        f(e).map(Cast(_, tpe))
     }
   }
 
@@ -505,202 +513,187 @@ object SIR {
     case object Interface extends CallType
   }
 
-  case object Nop                        extends SIR
-  case class MaybeInit(clazz: ClassInfo) extends SIR
-  case class NotNull(expr: Expr[_]) extends SIR {
-    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      NotNull(expr.substitute(target, newExpr))
+  case object Nop                        extends SSIR
+  case class MaybeInit(clazz: ClassInfo) extends SSIR
+  case class SetLocal(index: Int, e: Expr[_]) extends SSIR {
+    override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B =
+      f((base, e))
 
-    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      NotNull(f(expr))
+    override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[SIR] =
+      f(e).map(SetLocal(index, _))
   }
-  case class NotZero(expr: Expr[_]) extends SIR {
-    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      NotZero(expr.substitute(target, newExpr))
+  case class IntVarIncr(index: Int, amount: Int) extends SSIR
+  case class SetFakeLocal(tempVar: TempVar, e: Expr[_]) extends SSIR {
+    override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B =
+      f((base, e))
 
-    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      NotZero(f(expr))
+    override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[SIR] =
+      f(e).map(SetFakeLocal(tempVar, _))
   }
-  case class NotNegative(expr: Expr[Int]) extends SIR {
-    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      NotNegative(expr.substitute(target, newExpr))
+  case class ExecuteExpr(e: Expr[_]) extends SSIR {
+    override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B =
+      f((base, e))
 
-    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      NotNegative(f(expr))
+    override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[SIR] =
+      f(e).map(ExecuteExpr)
   }
-  case class SetLocal(index: Int, e: Expr[_]) extends SIR {
-    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      SetLocal(index, e.substitute(target, newExpr))
+  case class SetStackLocal(index: Int, pc: Long, e: Expr[_]) extends SSIR {
+    override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B =
+      f((base, e))
 
-    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      SetLocal(index, f(e))
+    override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[SIR] =
+      f(e).map(SetStackLocal(index, pc, _))
   }
-  case class SetStackLocal(index: Int, pc: Long, e: Expr[_]) extends SIR {
-    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      SetStackLocal(index, pc, e.substitute(target, newExpr))
+  case class SetArray[A](arr: Expr[Array[A]], idx: Expr[Int], obj: Expr[A]) extends SSIR {
+    override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B = {
+      val b1 = f((base, idx))
+      f((b1, obj))
+    }
 
-    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      SetStackLocal(index, pc, f(e))
+    override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[SIR] =
+      (f(arr), f(idx), f(obj)).mapN(SetArray(_, _, _))
   }
-  case class SetArray[A](arr: Expr[Array[A]], idx: Expr[Int], obj: Expr[A]) extends SIR {
-    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      SetArray(arr.substitute(target, newExpr), idx.substitute(target, newExpr), obj.substitute(target, newExpr))
+  case class SetField(e: Expr[_], f: Expr[_], fieldRefInfo: FieldRefInfo) extends SSIR {
+    override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B = {
+      val b1 = f((base, e))
+      f((b1, this.f))
+    }
 
-    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      SetArray(f(arr), f(idx), f(obj))
+    override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[SIR] =
+      (f(e), f(this.f)).mapN(SetField(_, _, fieldRefInfo))
   }
-  case class SetField(e: Expr[_], f: Expr[_], fieldRefInfo: FieldRefInfo) extends SIR {
-    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      SetField(e.substitute(target, newExpr), f.substitute(target, newExpr), fieldRefInfo)
+  case class SetStatic(fieldRefInfo: FieldRefInfo, e: Expr[_]) extends SSIR {
+    override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B =
+      f((base, e))
 
-    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      SetField(f(e), f(this.f), fieldRefInfo)
+    override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[SIR] =
+      f(e).map(SetStatic(fieldRefInfo, _))
   }
-  case class SetStatic(fieldRefInfo: FieldRefInfo, e: Expr[_]) extends SIR {
-    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      SetStatic(fieldRefInfo, e.substitute(target, newExpr))
+  case class CallSuper(e: Expr[_], variables: Seq[Expr[_]]) extends SSIR {
+    override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B = {
+      val b1 = f((base, e))
+      variables.foldLeft(b1)((bn, e) => f((bn, e)))
+    }
 
-    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      SetStatic(fieldRefInfo, f(e))
-  }
-  case class New(varIndex: Int, clazz: ClassInfo, variables: Seq[Expr[_]]) extends SIR {
-    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      New(varIndex, clazz, variables.map(_.substitute(target, newExpr)))
+    override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[SIR] = {
+      //Avoid a warning here by capturing the existential
+      def capture[A](e: Expr[A]): G[SIR] = {
+        val g1 = f(e)
+        val g2 = variables.toVector.traverse[G, Expr[Any]](e => f(e.asInstanceOf[Expr[Any]]))
 
-    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      New(varIndex, clazz, variables.map(f(_)))
-  }
-  case class CallSuper(e: Expr[_], variables: Seq[Expr[_]]) extends SIR {
-    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      CallSuper(e.substitute(target, newExpr), variables.map(_.substitute(target, newExpr)))
+        (g1, g2).mapN(CallSuper(_, _))
+      }
 
-    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      CallSuper(f(e), variables.map(f(_)))
-  }
-  case class Call(
-      varIndex: Int,
-      callType: CallType,
-      clazz: ClassInfo,
-      name: String,
-      descriptor: Descriptor.MethodDescriptor,
-      obj: Option[Expr[_]],
-      variables: Seq[Expr[_]]
-  ) extends SIR {
-    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      Call(
-        varIndex,
-        callType,
-        clazz,
-        name,
-        descriptor,
-        obj.map(_.substitute(target, newExpr)),
-        variables.map(_.substitute(target, newExpr))
-      )
-
-    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      Call(varIndex, callType, clazz, name, descriptor, obj.map(f(_)), variables.map(f(_)))
-  }
-  case class NewArray[A](varIndex: Int, size: Expr[Int], arrTpe: Type.Aux[A]) extends SIR {
-    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      NewArray(varIndex, size.substitute(target, newExpr), arrTpe)
-
-    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      NewArray(varIndex, f(size), arrTpe)
-  }
-  case class NewMultiArray(varIndex: Int, tpe: Type.Aux[Array[_]], sizesExpr: Vector[Expr[Int]]) extends SIR {
-    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      NewMultiArray(varIndex, tpe, sizesExpr.map(_.substitute(target, newExpr)))
-
-    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      NewMultiArray(varIndex, tpe, sizesExpr.map(f(_)))
+      capture(e)
+    }
   }
   case class If(expr: Expr[Boolean], branchPC: Long) extends SIR {
-    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      If(expr.substitute(target, newExpr), branchPC)
+    override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B =
+      f((base, expr))
 
-    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      If(f(expr), branchPC)
+    override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[SIR] =
+      f(expr).map(If(_, branchPC))
   }
   case class Switch(expr: Expr[Int], defaultPC: Long, pairs: Vector[(Int, Long)]) extends SIR {
-    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      Switch(expr.substitute(target, newExpr), defaultPC, pairs)
+    override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B =
+      f((base, expr))
 
-    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      Switch(f(expr), defaultPC, pairs)
+    override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[SIR] =
+      f(expr).map(Switch(_, defaultPC, pairs))
   }
   case class Goto(branchPC: Long) extends SIR
-  case class Return(expr: Option[Expr[_]]) extends SIR {
-    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      Return(expr.map(_.substitute(target, newExpr)))
+  case class Return(expr: Option[Expr[_]]) extends SSIR {
+    override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B =
+      expr.fold(base)(e => f((base, e)))
 
-    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      Return(expr.map(f(_)))
+    override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[SIR] =
+      expr.traverse[G, Expr[Any]](e => f(e.asInstanceOf[Expr[Any]])).map(Return(_))
   }
-  case class MonitorEnter(e: Expr[_]) extends SIR {
-    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      MonitorEnter(e.substitute(target, newExpr))
+  case class MonitorEnter(e: Expr[_]) extends SSIR {
+    override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B =
+      f((base, e))
 
-    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      MonitorEnter(f(e))
+    override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[SIR] =
+      f(e).map(MonitorEnter)
   }
-  case class MonitorExit(e: Expr[_]) extends SIR {
-    override def substituteExpr[B](target: Expr[B], newExpr: Expr[B]): SIR =
-      MonitorExit(e.substitute(target, newExpr))
+  case class MonitorExit(e: Expr[_]) extends SSIR {
+    override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B =
+      f((base, e))
 
-    override def modifyExpr(f: FunctionK[Expr, Expr]): SIR =
-      MonitorExit(f(e))
+    override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[SIR] =
+      f(e).map(MonitorExit)
+  }
+  case class Throw(e: Expr[_]) extends SSIR {
+    override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B =
+      f((base, e))
+
+    override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[SIR] =
+      f(e).map(Throw)
   }
 
-  case class SyntaxExtra(methodParams: Option[MethodParameters])
+  case class SyntaxExtra(methodParams: Option[MethodParameters], localVariableTable: Seq[LocalVariableTable]) {
 
-  def toSyntax(sir: SIR)(implicit syntaxExtra: SyntaxExtra): Seq[String] = sir match {
-    case Nop              => Nil
-    case MaybeInit(clazz) => Seq(s"${clazz.name}.<clinit>")
-    case NotNull(expr)    => Seq(s"notNull(${expr.toSyntax})")
-    case NotZero(expr)    => Seq(s"notZero(${expr.toSyntax})")
-    case NotNegative(e)   => Seq(s"notNegative(${e.toSyntax})")
-    case SetLocal(index, e) =>
-      Seq(syntaxExtra.methodParams.flatMap(_.parameters.lift(index - 1)).flatMap(_.name) match {
-        case Some(name) => s"var $name = ${e.toSyntax}"
-        case None       => s"var var_$index = ${e.toSyntax}"
-      })
-    case SetStackLocal(index, pc, e) => Seq(s"var stack_${index}_$pc = ${e.toSyntax}")
-    case SetArray(arr, idx, obj)     => Seq(s"${arr.toSyntax}[${idx.toSyntax}] = ${obj.toSyntax}")
-    case SetField(e, f, fieldRefInfo) =>
-      Seq(s"${e.toSyntax}.${fieldRefInfo.nameAndType.name} = (${f.toSyntax})")
-    case SetStatic(fieldRefInfo, e) =>
-      Seq(s"${fieldRefInfo.clazz.name}.${fieldRefInfo.nameAndType.name} = ${e.toSyntax}")
-    case New(varIndex, clazz, variables) =>
-      Seq(s"var local_$varIndex = new ${clazz.name}(${variables.map(_.toSyntax).mkString(", ")})")
-    case CallSuper(e, variables) =>
-      Seq(s"${e.toSyntax}.super(${variables.map(_.toSyntax).mkString(", ")})")
-    case Call(varIndex, _, clazz, name, _, None, variables) =>
-      Seq(s"var local_$varIndex = ${clazz.name}.$name(${variables.map(_.toSyntax).mkString(", ")})")
-    case Call(varIndex, _, _, name, _, Some(obj), variables) =>
-      Seq(s"var local_$varIndex = ${obj.toSyntax}.$name(${variables.map(_.toSyntax).mkString(", ")})")
-    case NewArray(varIndex, size, arrTpe) =>
-      Seq(s"var local_$varIndex = new ${arrTpe.describe}[${size.toSyntax}]")
-    case NewMultiArray(varIndex, tpe, sizesExpr) =>
-      @tailrec
-      def underlyingTpe(tpe: Type.Aux[_]): Type = tpe match {
-        case Type.Array(inner) => underlyingTpe(inner)
-        case _                 => tpe
+    def getVariableName(index: Int): String = {
+      if (index == 0) "this"
+      else {
+        val paramName = methodParams
+          .flatMap(_.parameters.lift(index - 1))
+          .flatMap(_.name)
+
+        lazy val localName = localVariableTable.flatMap(_.localVariables).find(_.index == index).map(_.name)
+
+        paramName.orElse(localName).getOrElse(s"var_$index")
       }
-
-      val dimensionsBrackets = sizesExpr.map(e => s"[${e.toSyntax}]").mkString
-
-      Seq(s"var local_$varIndex = new ${underlyingTpe(tpe).describe}$dimensionsBrackets")
-    case If(expr, branchPC) => Seq(s"if(${expr.toSyntax}) goto $branchPC")
-    case Switch(expr, defaultPC, pairs) =>
-      val gotos = pairs.map {
-        case (offset, pc) => s"case $offset: goto $pc"
-      }
-
-      s"switch(${expr.toSyntax}) {" +: gotos :+ s"default: goto $defaultPC" :+ "}"
-    case Goto(branchPC)     => Seq(s"goto $branchPC")
-    case Return(Some(expr)) => Seq(s"return ${expr.toSyntax}")
-    case Return(None)       => Seq("return")
-    case MonitorEnter(e)    => Seq(s"${e.toSyntax}.synchronizedStart")
-    case MonitorExit(e)     => Seq(s"${e.toSyntax}.synchronizedEnd")
+    }
   }
+  object SyntaxExtra {
+    def fromAttributes(attributes: Vector[Attribute]): SyntaxExtra = SyntaxExtra(
+      attributes.collectFirst {
+        case m: MethodParameters => m
+      },
+      attributes.collect {
+        case t: LocalVariableTable => t
+      }
+    )
+
+    val none: SyntaxExtra = SyntaxExtra(None, Nil)
+  }
+
+  def toSyntax(sir: SIR)(implicit syntaxExtra: SyntaxExtra): Seq[String] =
+    sir match {
+      case Nop              => Seq()
+      case MaybeInit(clazz) => Seq(s"classOf[${clazz.name.replace('/', '.')}]")
+      case SetLocal(index, e) =>
+        val varName = syntaxExtra.getVariableName(index)
+        Seq(s"var $varName = ${e.toSyntax}")
+      case IntVarIncr(index, amount) =>
+        val varName = syntaxExtra.getVariableName(index)
+        Seq(s"var $varName = $varName + $amount")
+      case SetFakeLocal(tempVar, e)     => Seq(s"var local_${tempVar.index} = ${e.toSyntax}")
+      case ExecuteExpr(e)               => Seq(e.toSyntax)
+      case SetStackLocal(index, pc, e)  => Seq(s"var stack_${index}_$pc = ${e.toSyntax}")
+      case SetArray(arr, idx, obj)      => Seq(s"${arr.toSyntax}[${idx.toSyntax}] = ${obj.toSyntax}")
+      case SetField(e, f, fieldRefInfo) => Seq(s"${e.toSyntax}.${fieldRefInfo.nameAndType.name} = (${f.toSyntax})")
+      case SetStatic(fieldRefInfo, e) =>
+        Seq(s"${fieldRefInfo.clazz.name.replace('/', '.')}.${fieldRefInfo.nameAndType.name} = ${e.toSyntax}")
+      case CallSuper(e, variables) => Seq(s"${e.toSyntax}.super(${variables.map(_.toSyntax).mkString(", ")})")
+      case If(expr, branchPC)      => Seq(s"if(${expr.toSyntax}) goto $branchPC")
+      case Switch(expr, defaultPC, pairs) =>
+        val gotos = pairs.map {
+          case (offset, pc) => s"case $offset: goto $pc"
+        }
+
+        s"switch(${expr.toSyntax}) {" +: gotos :+ s"default: goto $defaultPC" :+ "}"
+      case Goto(branchPC)     => Seq(s"goto $branchPC")
+      case Return(Some(expr)) => Seq(s"return ${expr.toSyntax}")
+      case Return(None)       => Seq("return")
+      case MonitorEnter(e)    => Seq(s"${e.toSyntax}.synchronizedStart")
+      case MonitorExit(e)     => Seq(s"${e.toSyntax}.synchronizedEnd")
+      case Throw(e)           => Seq(s"throw ${e.toSyntax}")
+    }
+
+  def toSyntaxCode(code: TreeMap[Long, Vector[SIR]])(implicit syntaxExtra: SyntaxExtra): String =
+    code
+      .map(t => s"${t._1}: ${t._2.flatMap(SIR.toSyntax(_)).mkString("\n")}")
+      .mkString("\n")
 }
