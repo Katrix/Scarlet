@@ -172,12 +172,14 @@ object OPCodeToSIR {
               }
 
             val sirBlock = CFG.SIRBlock.SIRCodeBasicBlock(leader, code.to(TreeMap))
+            val inlinedConstantsSirBlock = Inliner.inlineTrueFakeConstants(sirBlock)
+
             //TODO: Make amount of times to run the inliner configurable
             val (simplifiedSirBlock, inlinerTempvar) =
               runWhileChangesN[(CFG.SIRBlock.SIRCodeBasicBlock, TempVar)](
                 5,
                 t => Inliner.removeFakesFromSIR(t._1, t._2)
-              )((sirBlock, finalTempVar))
+              )((inlinedConstantsSirBlock, finalTempVar))
             BlockStep(
               accNodes.updated(node, simplifiedSirBlock),
               predecessorsInfo.updated(node, StackInfo.fromStack(stack)),

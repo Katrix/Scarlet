@@ -4,6 +4,7 @@ import cats.data.State
 import scarlet.graph.CFG
 import scarlet.ir.SIR.{Expr, TempVar}
 import perspective._
+import scarlet.ir.SIR.Expr.GetFakeLocal
 
 import scala.annotation.tailrec
 import scala.collection.immutable.{Queue, TreeMap}
@@ -48,7 +49,56 @@ object Inliner {
         Expr.GetField(_, _) | Expr.GetStatic(_) | Expr.New(_, _) | Expr.Call(_, _, _, _, _, _) | Expr.NewArray(_, _) |
         Expr.NewMultiArray(_, _) | Expr.Cast(_, _) =>
       true
-    case _ => false
+    case _ =>
+      e.monoFoldLeftShallow(false)(
+        Lambda[Tuple2K[Const[Boolean, *], SIR.Expr, *] ~>: Const[Boolean, *]] { fa =>
+          fa._1 || canExprCauseExceptions(fa._2)
+        }
+      )
+  }
+
+  def inlineTrueFakeConstants(
+      block: CFG.SIRBlock.SIRCodeBasicBlock
+  ): CFG.SIRBlock.SIRCodeBasicBlock = {
+    def substituteConsts[A](consts: TreeMap[TempVar, Expr[_]], expr: Expr[A]): Expr[A] =
+      consts.foldLeft(expr) {
+        case (accExpr, (tempVar, expr)) =>
+          val matches: Expr[_] => Boolean = {
+            case GetFakeLocal(`tempVar`, _) => true
+            case _                          => false
+          }
+          if (matches(accExpr)) expr.asInstanceOf[Expr[A]]
+          else
+            accExpr.monoTraverseDeep[cats.Id](new FunctionK[Expr, Expr] {
+              override def apply[Z](e: Expr[Z]): Expr[Z] = if (matches(e)) expr.asInstanceOf[Expr[Z]] else e
+            })
+      }
+
+    val (constExprs, codeWithoutConstants) = block.code.foldLeft((TreeMap.empty[TempVar, Expr[_]], block.code)) {
+      case (topAcc, (topIdx, irs)) =>
+        irs.zipWithIndex.foldLeft(topAcc) {
+          case ((acc, currentCode), (ir, idx)) =>
+            ir match {
+              case SIR.SetFakeLocal(tempVar, expr) if !canExprCauseExceptions(expr) =>
+                val substitutedExpr = substituteConsts(acc, expr)
+                val newAcc          = acc.updated(tempVar, substitutedExpr)
+                val newCode = currentCode.updatedWith(topIdx) {
+                  case Some(vec) if vec.sizeIs > 1 => Some(vec.patch(idx, Nil, 1))
+                  case _                           => Some(Vector(SIR.Nop))
+                }
+
+                (newAcc, newCode)
+              case _ => (acc, currentCode)
+            }
+        }
+    }
+
+    val inlinedCode = codeWithoutConstants.map {
+      case (idx, irs) =>
+        idx -> irs.map(_.monoTraverse[cats.Id](Lambda[Expr ~>: Expr](e => substituteConsts(constExprs, e))))
+    }
+
+    CFG.SIRBlock.SIRCodeBasicBlock(block.leader, inlinedCode)
   }
 
   def removeFakesFromSIR(
