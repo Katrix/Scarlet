@@ -36,7 +36,7 @@ object Inliner {
     }
   }
 
-  private case class PropagationStep(queue: Queue[QueueEntry], resultCode: Code) {
+  private case class PropagationStep(queue: Queue[QueueEntry], resultCode: Code, tempVar: TempVar) {
     //noinspection MutatorLikeMethodIsParameterless
     def removeSideEffectsExprs: PropagationStep =
       copy(queue = queue.reverseIterator.takeWhile(e => !canExprCauseExceptions(e.expr)).to(Queue).reverse)
@@ -51,7 +51,10 @@ object Inliner {
     case _ => false
   }
 
-  def removeFakesFromSIR(block: CFG.SIRBlock.SIRCodeBasicBlock): CFG.SIRBlock.SIRCodeBasicBlock = {
+  def removeFakesFromSIR(
+      block: CFG.SIRBlock.SIRCodeBasicBlock,
+      tempVar: TempVar
+  ): (CFG.SIRBlock.SIRCodeBasicBlock, TempVar) = {
 
     /*
     Example 1:
@@ -141,7 +144,7 @@ object Inliner {
           }
       }
 
-    val resultStep = block.code.foldLeft(PropagationStep(Queue.empty, block.code)) {
+    val resultStep = block.code.foldLeft(PropagationStep(Queue.empty, block.code, tempVar)) {
       case (topStep, (idx, codes)) =>
         codes.zipWithIndex.foldLeft(topStep) {
           case (startStep, (ir, innerIdx)) =>
@@ -184,12 +187,26 @@ object Inliner {
             def trySubstituteAndRemoveSideEffects: PropagationStep =
               trySubstitute.removeSideEffectsExprs
 
+            def reverseInline[A](e: Expr[A], makeSir: Expr[A] => SIR) = e match {
+              case Expr.GetFakeLocal(_, _) | Expr.GetStackLocal(_, _, _) | Expr.GetLocal(_) => startStep
+              case _ =>
+                val newCode = Vector(SIR.SetFakeLocal(tempVar, e), makeSir(Expr.GetFakeLocal(tempVar, e.tpe)))
+
+                startStep.copy(
+                  resultCode = startStep.resultCode.updatedWith(idx) {
+                    case Some(vec) => Some(vec.patch(innerIdx, newCode, 2))
+                    case None      => Some(newCode)
+                  },
+                  tempVar = tempVar.inc
+                )
+            }
+
             ir match {
               case SIR.SetFakeLocal(tempVar, e) =>
-                tempVarUses.get(tempVar) match {
+                val newStep = tempVarUses.get(tempVar) match {
                   case Some(uses) if uses > 1 => trySubstitute //Treat it like normal
                   case Some(1)                => addTempvar(tempVar, e)
-                  case Some(0)                =>
+                  case Some(0) =>
                     trySubstitute // Should be unreachable, but just in case, we treat it like normal
 
                     //Def here to avoid existential warning by capturing the existential
@@ -221,14 +238,50 @@ object Inliner {
 
                     capture(e)
                 }
+
+                // Try to remove MaybeInit
+                // We do it here as if everything got inlined properly, then
+                // there shouldn't be anything in between the
+                // MaybeInit and the New
+                e match {
+                  case Expr.New(clazz, _) =>
+                    def canRemove(sir: SIR): Boolean = sir match {
+                      case SIR.MaybeInit(clazz2) => clazz.name == clazz2.name
+                      case _                     => false
+                    }
+
+                    val code = newStep.resultCode
+
+                    def removeMaybeInit(idx: Long, innerIdx: Vector[SIR] => Int) =
+                      for {
+                        vec <- code.get(idx)
+                        vecIdx = innerIdx(vec)
+                        e <- vec.lift(vecIdx)
+                      } yield {
+                        //If we've gotten this far, we return this object no matter if it's a MaybeInit or not
+                        if (canRemove(e)) code.updated(idx, vec.patch(vecIdx, Nil, 1)) else code
+                      }
+
+                    newStep.copy(
+                      resultCode = removeMaybeInit(idx, _ => innerIdx - 1)
+                        .orElse(removeMaybeInit(idx - 1, _.length - 1))
+                        .getOrElse(code)
+                    )
+
+                  case _ => newStep
+                }
               case SIR.MaybeInit(_) | SIR.SetArray(_, _, _) | SIR.SetField(_, _, _) | SIR.SetStatic(_, _) |
                   SIR.CallSuper(_, _) | SIR.MonitorEnter(_) | SIR.MonitorExit(_) =>
                 trySubstituteAndRemoveSideEffects
-              case _ => trySubstitute
+
+              //We don't inline if and switch, as this makes the structurers job easier later. In fact we want to expand them
+              case SIR.If(e, branchPC)             => reverseInline(e, SIR.If(_, branchPC))
+              case SIR.Switch(e, defaultPC, pairs) => reverseInline(e, SIR.Switch(_, defaultPC, pairs))
+              case _                               => trySubstitute
             }
         }
     }
 
-    block.copy(code = resultStep.resultCode)
+    (block.copy(code = resultStep.resultCode), resultStep.tempVar)
   }
 }

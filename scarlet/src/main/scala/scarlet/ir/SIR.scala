@@ -268,6 +268,7 @@ object SIR {
         Lambda[Tuple2K[Const[Boolean, *], Expr, *] ~>: Const[Boolean, *]](fa => fa._1 || fa._2 == target)
       )
   }
+
   sealed abstract class BinaryOp(val symbol: String)
   object BinaryOp {
     case object Add                                     extends BinaryOp("+")
@@ -278,8 +279,8 @@ object SIR {
     case object ShiftLeft                               extends BinaryOp("<<")
     case object ShiftRight                              extends BinaryOp(">>")
     case object LogShiftRight                           extends BinaryOp(">>>")
-    case object And                                     extends BinaryOp("&")
-    case object Or                                      extends BinaryOp("|")
+    case object BitAnd                                  extends BinaryOp("&")
+    case object BitOr                                   extends BinaryOp("|")
     case object Xor                                     extends BinaryOp("^")
     case object Equal                                   extends BinaryOp("==")
     case object NotEqual                                extends BinaryOp("!=")
@@ -692,8 +693,19 @@ object SIR {
       case Throw(e)           => Seq(s"throw ${e.toSyntax}")
     }
 
-  def toSyntaxCode(code: TreeMap[Long, Vector[SIR]])(implicit syntaxExtra: SyntaxExtra): String =
-    code
-      .map(t => s"${t._1}: ${t._2.flatMap(SIR.toSyntax(_)).mkString("\n")}")
-      .mkString("\n")
+  def toSyntaxBlockList(code: TreeMap[Long, Vector[SIR]])(implicit syntaxExtra: SyntaxExtra): Seq[String] =
+    code.flatMap {
+      case (pc, innerCode) =>
+        toSyntaxPC(pc, innerCode)
+    }.toSeq
+
+  def toSyntaxPC(pc: Long, code: Vector[SIR])(implicit syntaxExtra: SyntaxExtra): Vector[String] = {
+    val lines = code.flatMap(SIR.toSyntax)
+    lines match {
+      case Vector()    => Vector()
+      case Vector(one) => Vector(s"$pc: $one")
+      case Vector(head, tail @ _*) =>
+        s"$pc: $head" +: tail.toVector.map(line => " " * pc.toString.length + s": $line")
+    }
+  }
 }

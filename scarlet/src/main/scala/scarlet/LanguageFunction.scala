@@ -180,7 +180,7 @@ object LanguageFunction {
     )
 
   def sirBlockLabel(block: CFG.SIRBlock): String = block match {
-    case CFG.SIRBlock.SIRCodeBasicBlock(code)               => code.head._1.toString
+    case CFG.SIRBlock.SIRCodeBasicBlock(leader, _)          => leader.toString
     case CFG.SIRBlock.SIRErrorBlock(_, _, _, codeWithStack) => codeWithStack.headOption.fold("<error>")(_._1.toString)
   }
 
@@ -288,7 +288,7 @@ object LanguageFunction {
                 root,
                 sirBlockLabel,
                 {
-                  case CFG.SIRBlock.SIRCodeBasicBlock(code) =>
+                  case CFG.SIRBlock.SIRCodeBasicBlock(_, code) =>
                     code.toVector.flatMap {
                       case (pc, Vector(oneOp)) => Vector(s"$pc: $oneOp")
                       case (pc, Vector(headOp, tailOps @ _*)) =>
@@ -357,10 +357,8 @@ object LanguageFunction {
               root,
               sirBlockLabel,
               {
-                case CFG.SIRBlock.SIRCodeBasicBlock(code) =>
-                  code.toVector.flatMap {
-                    case (pc, code) => syntaxCode(pc, code)
-                  }
+                case CFG.SIRBlock.SIRCodeBasicBlock(_, code) =>
+                  SIR.toSyntaxBlockList(code)
                 case CFG.SIRBlock.SIRErrorBlock(pc, error, op, codeWithStack) =>
                   codeWithStack.flatMap {
                     case (pc, frame) => errorSyntaxCode(pc, frame)
@@ -395,7 +393,7 @@ object LanguageFunction {
         in.rightmapMethod(cfg =>
           cfg.graph.nodes
             .map(_.value match {
-              case CFG.SIRBlock.SIRCodeBasicBlock(code) => Right(code.to(LongMap))
+              case CFG.SIRBlock.SIRCodeBasicBlock(_, code) => Right(code.to(LongMap))
               case CFG.SIRBlock.SIRErrorBlock(pc, error, op, codeWithStack) =>
                 Left(
                   codeWithStack.transform((_, f) => Right(f)).updated(pc, Left((op, error)))
@@ -418,7 +416,7 @@ object LanguageFunction {
         sirCode.toVector.flatMap {
           case (pc, v) =>
             v match {
-              case Right(code)             => syntaxCode(pc, code)
+              case Right(code)             => SIR.toSyntaxPC(pc, code)
               case Left(Right(frame))      => errorSyntaxCode(pc, frame)
               case Left(Left((op, error))) => Vector(s"$pc: $op // $error")
             }

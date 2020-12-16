@@ -87,4 +87,4 @@ https://www.ndss-symposium.org/ndss2015/ndss-2015-programme/no-more-gotos-decomp
 https://www.backerstreet.com/decompiler/frameless_functions.php  
 https://www.researchgate.net/publication/2645337_Analyzing_Control_Flow_in_Java_Bytecode  
 http://people.irisa.fr/David.Pichardie/papers/aplas10.pdf
-https://eli.thegreenplace.net/2015/directed-graph-traversal-orderings-and-applications-to-data-flow-analysis/#id4
+https://eli.thegreenplace.net/2015/directed-graph-traversal-orderings-and-applications-to-data-flow-analysis/

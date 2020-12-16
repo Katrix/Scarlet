@@ -14,7 +14,7 @@ lazy val scarlet = project.settings(
     "org.scalameta" %% "scalafmt-dynamic" % "2.6.4"
   ),
   libraryDependencies += "org.typelevel"    %% "cats-core"   % "2.2.0",
-  libraryDependencies += "net.katsstuff"    %% "perspective" % "0.0.2",
+  libraryDependencies += "net.katsstuff"    %% "perspective" % "0.0.4",
   libraryDependencies += "com.chuusai"      %% "shapeless"   % "2.3.3",
   libraryDependencies += "org.scala-graph"  %% "graph-core"  % "1.13.2",
   libraryDependencies += "org.scala-graph"  %% "graph-dot"   % "1.13.0",

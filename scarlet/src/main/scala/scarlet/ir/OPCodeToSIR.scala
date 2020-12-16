@@ -167,18 +167,21 @@ object OPCodeToSIR {
               if (n == 0) oldA
               else {
                 val newA = f(oldA)
-                if(oldA != newA) runWhileChangesN(n - 1, f)(newA)
+                if (oldA != newA) runWhileChangesN(n - 1, f)(newA)
                 else newA
               }
 
-            val sirBlock = CFG.SIRBlock.SIRCodeBasicBlock(code.to(TreeMap))
-            //Think it should be safe to run this multiple times
-            //TODO: Make this configurable
-            val simplifiedSirBlock = runWhileChangesN(5, Inliner.removeFakesFromSIR)(sirBlock)
+            val sirBlock = CFG.SIRBlock.SIRCodeBasicBlock(leader, code.to(TreeMap))
+            //TODO: Make amount of times to run the inliner configurable
+            val (simplifiedSirBlock, inlinerTempvar) =
+              runWhileChangesN[(CFG.SIRBlock.SIRCodeBasicBlock, TempVar)](
+                5,
+                t => Inliner.removeFakesFromSIR(t._1, t._2)
+              )((sirBlock, finalTempVar))
             BlockStep(
               accNodes.updated(node, simplifiedSirBlock),
               predecessorsInfo.updated(node, StackInfo.fromStack(stack)),
-              finalTempVar
+              inlinerTempvar
             )
 
           case Left((pc, error, op, code, outTempVar)) =>
@@ -431,8 +434,8 @@ object OPCodeToSIR {
         nop(stack11Add(tpe, IRType.Int)((e2, e1) => Expr.BinaryExpr(e1, e2, SIR.BinaryOp.ShiftRight, tpe)))
       case OPCode.LogShiftRight(tpe) =>
         nop(stack11Add(tpe, IRType.Int)((e2, e1) => Expr.BinaryExpr(e1, e2, SIR.BinaryOp.LogShiftRight, tpe)))
-      case OPCode.And(tpe) => nop(stack2Add(tpe)(Expr.BinaryExpr(_, _, SIR.BinaryOp.And, tpe)))
-      case OPCode.Or(tpe)  => nop(stack2Add(tpe)(Expr.BinaryExpr(_, _, SIR.BinaryOp.Or, tpe)))
+      case OPCode.And(tpe) => nop(stack2Add(tpe)(Expr.BinaryExpr(_, _, SIR.BinaryOp.BitAnd, tpe)))
+      case OPCode.Or(tpe)  => nop(stack2Add(tpe)(Expr.BinaryExpr(_, _, SIR.BinaryOp.BitOr, tpe)))
       case OPCode.Xor(tpe) => nop(stack2Add(tpe)(Expr.BinaryExpr(_, _, SIR.BinaryOp.Xor, tpe)))
 
       case OPCode.IntVarIncr(index, amount) => irSimple(SIR.IntVarIncr(index, amount), stack)

@@ -22,7 +22,7 @@ object CFG {
   case class OPCodeBasicBlock(leader: Long, code: TreeMap[Long, OPCode], isCatch: Boolean)
   sealed trait SIRBlock
   object SIRBlock {
-    case class SIRCodeBasicBlock(code: TreeMap[Long, Vector[SIR]])                              extends SIRBlock
+    case class SIRCodeBasicBlock(leader: Long, code: TreeMap[Long, Vector[SIR]])                extends SIRBlock
     case class SIRErrorBlock(pc: Long, error: String, op: OPCode, codeWithStack: CodeWithStack) extends SIRBlock
 
     implicit val ordering: Ordering[SIRBlock] = {
@@ -34,18 +34,68 @@ object CFG {
     }
   }
 
-  sealed trait SIRStructuredBlock
+  sealed trait SIRStructuredBlock {
+    def firstKey: Long
+  }
   object SIRStructuredBlock {
-    case class CodeBlock(code: TreeMap[Long, Vector[SIR.SSIR]])                              extends SIRStructuredBlock
-    case class ErrorBlock(pc: Long, error: String, op: OPCode, codeWithStack: CodeWithStack) extends SIRStructuredBlock
+    case class UnprocessedBlock(block: SIRBlock) extends SIRStructuredBlock {
+      override def firstKey: Long = block match {
+        case SIRBlock.SIRCodeBasicBlock(_, code)            => code.firstKey
+        case SIRBlock.SIRErrorBlock(_, _, _, codeWithStack) => codeWithStack.firstKey
+      }
+    }
 
-    case class Sequence(blocks: Seq[SIRStructuredBlock]) extends SIRStructuredBlock
-    case class If(cond: SIR.Expr[Boolean], ifTrue: SIRStructuredBlock, ifFalse: Option[SIRStructuredBlock])
-        extends SIRStructuredBlock
-    case class While(cond: SIR.Expr[Boolean], block: SIRStructuredBlock, isDoWhile: Boolean) extends SIRStructuredBlock
-    case class EndlessLoop(block: SIRStructuredBlock)                                        extends SIRStructuredBlock
-    case class Match(cases: Seq[(SIR.Expr[Boolean], SIRStructuredBlock)], default: SIRStructuredBlock)
-        extends SIRStructuredBlock
+    case class CodeBlock(code: TreeMap[Long, Vector[SIR.SSIR]]) extends SIRStructuredBlock {
+      override def firstKey: Long = code.firstKey
+    }
+    case class ErrorBlock(error: String, errorData: ErrorData) extends SIRStructuredBlock {
+      override def firstKey: Long = errorData match {
+        case ErrorData.SIRConversionError(_, _, codeWithStack) => codeWithStack.firstKey
+        case ErrorData.ExistingBlock(block)                    => block.firstKey
+        case ErrorData.CFGData(cfg)                            => cfg.graph.nodes.minBy(_.value.firstKey).value.firstKey
+        case ErrorData.NoData                                  => Long.MaxValue
+      }
+    }
+
+    sealed trait ErrorData
+    object ErrorData {
+      case class SIRConversionError(pc: Long, op: OPCode, codeWithStack: CodeWithStack) extends ErrorData
+      case class ExistingBlock(block: SIRStructuredBlock)                               extends ErrorData
+      case class CFGData(cfg: CFG[SIRStructuredBlock])                                  extends ErrorData
+      case object NoData                                                                extends ErrorData
+    }
+
+    case class Sequence(blocks: Seq[SIRStructuredBlock]) extends SIRStructuredBlock {
+      override def firstKey: Long = blocks.minBy(_.firstKey).firstKey
+    }
+    case class If(cond: SIR.Expr[_], ifTrue: SIRStructuredBlock, ifFalse: Option[SIRStructuredBlock])
+        extends SIRStructuredBlock {
+      override def firstKey: Long =
+        ifFalse.fold(ifTrue.firstKey)(falseBlock => math.min(ifTrue.firstKey, falseBlock.firstKey))
+    }
+    case class While(cond: SIR.Expr[_], block: SIRStructuredBlock, isDoWhile: Boolean) extends SIRStructuredBlock {
+      override def firstKey: Long = block.firstKey
+    }
+    case class EndlessLoop(block: SIRStructuredBlock) extends SIRStructuredBlock {
+      override def firstKey: Long = block.firstKey
+    }
+    case class Match(cases: Seq[(SIR.Expr[_], SIRStructuredBlock)], default: SIRStructuredBlock)
+        extends SIRStructuredBlock {
+      override def firstKey: Long = math.min(cases.minBy(_._2.firstKey)._2.firstKey, default.firstKey)
+    }
+    //TODO: Handle cases for other types. Can those even appear, and if so, how
+    case class Switch(value: SIR.Expr[_], cases: Seq[(Long, SIRStructuredBlock)], default: SIRStructuredBlock)
+        extends SIRStructuredBlock {
+      override def firstKey: Long = math.min(cases.minBy(_._2.firstKey)._2.firstKey, default.firstKey)
+    }
+
+    implicit val ordering: Ordering[SIRStructuredBlock] = {
+      case (_: ErrorBlock, _: ErrorBlock) => 0
+      case (_: ErrorBlock, _)             => -1
+      case (_, _: ErrorBlock)             => 1
+      case (cx, cy) =>
+        cx.firstKey.compare(cy.firstKey)
+    }
   }
 
   private object Last {
@@ -218,41 +268,5 @@ object CFG {
     }
     val nodes = scc.nodes.map(node => componentToGraph(node.value))
     Graph.from(nodes, edges)
-  }
-
-  /*
-  def structure(cfg: CFG[SIRBlock]) = {
-    val regions = sccGraph(cfg.graph)
-    val sortedNodes = regions.topologicalSortByComponent.toVector.flatMap(
-      _.getOrElse(sys.error("impossible"))
-        .withLayerOrdering(regions.NodeOrdering { (n1, n2) =>
-          val l1 = n1.value.nodes.view.map(_.value).minOption
-          val l2 = n2.value.nodes.view.map(_.value).minOption
-          implicitly[Ordering[Option[SIRBlock]]].compare(l1, l2)
-        })
-        .toVector
-    )
-
-    sortedNodes.map { regionNode =>
-      val region = regionNode.value
-
-      if (region.nodes.sizeIs == 1) {
-        // Acyclic region
-      } else {
-        // Cyclic region
-        val (transformedRegions, transformedNode) = transformSinglePredecessorSuccessor(regions, regionNode)
-      }
-
-      ???
-    }
-
-    ???
-  }
-   */
-
-  def structureAcyclic[N, E[+X] <: EdgeLikeIn[X]](graph: Graph[N, E]) = {
-    graph.topologicalSort.map { order => }
-
-    ???
   }
 }
