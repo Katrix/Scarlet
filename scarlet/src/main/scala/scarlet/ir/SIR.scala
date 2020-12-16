@@ -547,8 +547,9 @@ object SIR {
   }
   case class SetArray[A](arr: Expr[Array[A]], idx: Expr[Int], obj: Expr[A]) extends SSIR {
     override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B = {
-      val b1 = f((base, idx))
-      f((b1, obj))
+      val b1 = f((base, arr))
+      val b2 = f((b1, idx))
+      f((b2, obj))
     }
 
     override def monoTraverse[G[_]: Applicative](f: Expr ~>: Compose2[G, SIR.Expr, *]): G[SIR] =
