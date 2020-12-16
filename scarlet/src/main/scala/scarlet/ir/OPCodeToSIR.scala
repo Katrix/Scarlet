@@ -406,7 +406,7 @@ object OPCodeToSIR {
           }.flatten
         )
 
-      case OPCode.Swap => nop(stack2(IRType.Category1)((e1, e2, r) => e2 :: e1 :: r))
+      case OPCode.Swap => nop(stack2(IRType.Category1)((e1, e2, r) => e1 :: e2 :: r))
 
       case OPCode.Add(tpe)  => nop(stack2Add(tpe)(Expr.BinaryExpr(_, _, SIR.BinaryOp.Add, tpe)))
       case OPCode.Sub(tpe)  => nop(stack2Add(tpe)(Expr.BinaryExpr(_, _, SIR.BinaryOp.Sub, tpe)))
