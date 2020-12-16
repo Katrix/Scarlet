@@ -17,6 +17,9 @@ import scala.language.implicitConversions
   */
 object OPCodeToSIR {
 
+  val WeakTypingIntTypes    = true
+  val intTypes: Set[IRType] = Set(IRType.Int, IRType.Short, IRType.Char, IRType.Byte, IRType.Boolean)
+
   type Stack         = List[Expr[_]]
   type CodeWithStack = LongMap[StackFrame]
 
@@ -171,17 +174,19 @@ object OPCodeToSIR {
                 else newA
               }
 
-            val sirBlock = CFG.SIRBlock.SIRCodeBasicBlock(leader, code.to(TreeMap))
-            val inlinedConstantsSirBlock = Inliner.inlineTrueFakeConstants(sirBlock)
+            val sirBlock                 = CFG.SIRBlock.SIRCodeBasicBlock(leader, code.to(TreeMap))
+            val inlinedConstantsSirBlock = SIRPostProcess.inlineTrueFakeConstants(sirBlock)
 
             //TODO: Make amount of times to run the inliner configurable
             val (simplifiedSirBlock, inlinerTempvar) =
               runWhileChangesN[(CFG.SIRBlock.SIRCodeBasicBlock, TempVar)](
                 5,
-                t => Inliner.removeFakesFromSIR(t._1, t._2)
+                t => SIRPostProcess.removeFakesFromSIR(t._1, t._2)
               )((inlinedConstantsSirBlock, finalTempVar))
+            val weakTypingFixed = SIRPostProcess.fixSimpleWeakTyping(simplifiedSirBlock)
+
             BlockStep(
-              accNodes.updated(node, simplifiedSirBlock),
+              accNodes.updated(node, weakTypingFixed),
               predecessorsInfo.updated(node, StackInfo.fromStack(stack)),
               inlinerTempvar
             )
@@ -242,14 +247,29 @@ object OPCodeToSIR {
     /** Is the expression type of type 2 */
     def isCat2Type(expr: Expr[_]): Boolean = IRType.Category2.isSupertypeOf(expr.tpe)
 
+    /** Checks if the type of an expr matches a needed type. Might modify the expr slightly to make stuff work */
+    def typeMatches[A](expr: Expr[_], wantedType: IRType.Aux[A]): Option[Expr[A]] = {
+      val exprType    = expr.tpe
+      val isSupertype = wantedType.isSupertypeOf(exprType)
+      if (!isSupertype && WeakTypingIntTypes && intTypes.contains(exprType) && intTypes.contains(wantedType)) {
+        Some(Expr.Convert(expr, wantedType))
+      } else if (isSupertype) {
+        Some(expr.asInstanceOf[Expr[A]])
+      } else None
+    }
+
     /** Use one value on the stack */
     def stack1[B](tpe: IRType, stackToUse: Stack = stack)(
         use: (Expr[tpe.A], Stack) => B
-    ): Either[String, B] = stackToUse match {
-      case (h: Expr[tpe.A @unchecked]) :: t if tpe.isSupertypeOf(h.tpe) => Right(use(h, t))
-      case (h: Expr[_]) :: _ =>
-        Left(s"Wanted ${tpe.describe} in stack, but found ${h.tpe.describe} instead at $pc")
-      case Nil => Left(s"Wanted one value in the stack, but it was empty at $pc")
+    ): Either[String, B] = {
+      val preciseType: IRType.Aux[tpe.A] = tpe
+      stackToUse match {
+        case (h: Expr[_]) :: t if typeMatches(h, preciseType).isDefined =>
+          Right(use(typeMatches(h, preciseType).get, t))
+        case (h: Expr[_]) :: _ =>
+          Left(s"Wanted ${tpe.describe} in stack, but found ${h.tpe.describe} instead at $pc")
+        case Nil => Left(s"Wanted one value in the stack, but it was empty at $pc")
+      }
     }
 
     /** Use two values of different types on the stack */

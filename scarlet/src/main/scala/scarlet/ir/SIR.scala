@@ -309,6 +309,7 @@ object SIR {
       override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = {
         val valueRep = value match {
           case _: String => "\"" + value + "\""
+          case _: Char   => "\'" + value + "\'"
           case _         => value.toString
         }
         if (syntaxExtra.printTypes) s"($valueRep: ${tpe.describe})" else valueRep

@@ -4,12 +4,12 @@ import cats.data.State
 import scarlet.graph.CFG
 import scarlet.ir.SIR.{Expr, TempVar}
 import perspective._
-import scarlet.ir.SIR.Expr.GetFakeLocal
+import scarlet.ir.SIR.Expr.{ConstTpe, GetFakeLocal}
 
 import scala.annotation.tailrec
 import scala.collection.immutable.{Queue, TreeMap}
 
-object Inliner {
+object SIRPostProcess {
 
   private type Code = TreeMap[Long, Vector[SIR]]
 
@@ -333,5 +333,31 @@ object Inliner {
     }
 
     (block.copy(code = resultStep.resultCode), resultStep.tempVar)
+  }
+
+  def fixSimpleWeakTyping(block: CFG.SIRBlock.SIRCodeBasicBlock): CFG.SIRBlock.SIRCodeBasicBlock = {
+    val fixedCode = block.code.map(t =>
+      t._1 -> t._2.map(ir =>
+        ir.monoTraverseDeep[cats.Id](new FunctionK[Expr, Expr] {
+          override def apply[Z](e: Expr[Z]): Expr[Z] = e match {
+            case Expr.Convert(Expr.ConstTpe(from, value), to)
+                if OPCodeToSIR.intTypes.contains(from) && OPCodeToSIR.intTypes.contains(to) =>
+              val res = if (to == SIR.Type.Boolean) Expr.ConstTpe(SIR.Type.Boolean, value != 0)
+              else if (to == SIR.Type.Char) value match {
+                case i: Int   => ConstTpe(SIR.Type.Char, i.toChar)
+                case s: Short => ConstTpe(SIR.Type.Char, s.toChar)
+                case b: Byte  => ConstTpe(SIR.Type.Char, b.toChar)
+                case _        => e
+              }
+              else e
+
+              res.asInstanceOf[Expr[Z]]
+            case _ => e
+          }
+        })
+      )
+    )
+
+    CFG.SIRBlock.SIRCodeBasicBlock(block.leader, fixedCode)
   }
 }
