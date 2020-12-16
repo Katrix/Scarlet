@@ -79,6 +79,9 @@ object SIR {
 
     override def toString: String = index.toString
   }
+  object TempVar {
+    implicit val ordering: Ordering[TempVar] = Ordering.by(_.index)
+  }
 
   /**
     * Unlike the expressions in the referenced paper, we do quite a bit of
@@ -303,7 +306,13 @@ object SIR {
     }
 
     case class ConstTpe[A](tpe: Type.Aux[A], value: A) extends Expr[A] {
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"($value: ${tpe.describe})"
+      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = {
+        val valueRep = value match {
+          case _: String => "\"" + value + "\""
+          case _         => value.toString
+        }
+        if (syntaxExtra.printTypes) s"($valueRep: ${tpe.describe})" else valueRep
+      }
     }
 
     case object Null extends Expr[AnyRef] {
@@ -347,11 +356,16 @@ object SIR {
     }
 
     case class GetFakeLocal[A](tempVar: TempVar, tpe: Type.Aux[A]) extends Expr[A] {
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"(local_${tempVar.index}: ${tpe.describe})"
+      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = {
+        val name = s"local_${tempVar.index}"
+        if (syntaxExtra.printTypes) s"($name: ${tpe.describe})" else name
+      }
     }
     case class GetStackLocal[A](index: Int, jumpTarget: Long, tpe: Type.Aux[A]) extends Expr[A] {
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String =
-        s"(stack_${index}_$jumpTarget: ${tpe.describe})"
+      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = {
+        val name = s"stack_${index}_$jumpTarget"
+        if (syntaxExtra.printTypes) s"($name: ${tpe.describe})" else name
+      }
     }
 
     case class IsInstanceOf(e: Expr[_], classInfo: ClassInfo) extends Expr[Boolean] {
@@ -633,7 +647,11 @@ object SIR {
       f(e).map(Throw)
   }
 
-  case class SyntaxExtra(methodParams: Option[MethodParameters], localVariableTable: Seq[LocalVariableTable]) {
+  case class SyntaxExtra(
+      methodParams: Option[MethodParameters],
+      localVariableTable: Seq[LocalVariableTable],
+      printTypes: Boolean
+  ) {
 
     def getVariableName(index: Int): String = {
       if (index == 0) "this"
@@ -649,16 +667,17 @@ object SIR {
     }
   }
   object SyntaxExtra {
-    def fromAttributes(attributes: Vector[Attribute]): SyntaxExtra = SyntaxExtra(
+    def fromAttributes(attributes: Vector[Attribute], printTypes: Boolean = false): SyntaxExtra = SyntaxExtra(
       attributes.collectFirst {
         case m: MethodParameters => m
       },
       attributes.collect {
         case t: LocalVariableTable => t
-      }
+      },
+      printTypes
     )
 
-    val none: SyntaxExtra = SyntaxExtra(None, Nil)
+    val none: SyntaxExtra = SyntaxExtra(None, Nil, true)
   }
 
   def toSyntax(sir: SIR)(implicit syntaxExtra: SyntaxExtra): Seq[String] =
