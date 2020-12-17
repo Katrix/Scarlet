@@ -370,8 +370,9 @@ object SIR {
     }
 
     case class IsInstanceOf(e: Expr[_], classInfo: ClassInfo) extends Expr[Boolean] {
-      override def tpe: Type.Aux[Boolean]                              = Type.Boolean
-      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String = s"${e.toSyntax}.isInstanceOf[${tpe.describe}]"
+      override def tpe: Type.Aux[Boolean] = Type.Boolean
+      override def toSyntax(implicit syntaxExtra: SyntaxExtra): String =
+        s"${e.toSyntax}.isInstanceOf[${classInfo.name.replace('/', '.')}]"
 
       override def monoFoldLeftShallow[B](base: B)(f: Tuple2K[Const[B, *], Expr, *] ~>: Const[B, *]): B =
         f((base, e))
