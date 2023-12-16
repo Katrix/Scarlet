@@ -1,7 +1,6 @@
 package scarlet
 
 import java.io.InputStream
-
 import cats.data.Validated.Valid
 import cats.data.{EitherNel, ValidatedNel, NonEmptyList => NEL}
 import cats.syntax.all._
@@ -14,7 +13,7 @@ import scarlet.classfile.denormalized.attribute._
 import scarlet.classfile.denormalized.opcodes.{OPCode => DeOPCode}
 import scarlet.classfile.denormalized.{Classfile => DenormClassfile}
 import scarlet.classfile.raw.{ClassfileCodec, Classfile => RawClassfile}
-import scarlet.graph.CFG
+import scarlet.graph.{CFG, Structurer}
 import scarlet.ir.OPCodeToSIR.StackFrame
 import scarlet.ir._
 import scodec.Err
@@ -425,5 +424,13 @@ object LanguageFunction {
 
       SimpleClassSyntax.classObjToSyntax(stringOut).syntax
     }
+  }
+
+  object `SIR-Structured` extends LanguageFunction[ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.SIRBlock]], ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG.SIRStructuredBlock]] {
+    override def process(in: ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG[CFG.SIRBlock]]): EitherNel[String, ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG.SIRStructuredBlock]] =
+      Right(in.rightmapMethod(cfg => Structurer.structureStart(cfg)))
+
+
+    override def print(out: ClassfileWithData[Unit, Unit, LongMap[NEL[String]], CFG.SIRStructuredBlock]): Str = Scarlet.printer(out)
   }
 }

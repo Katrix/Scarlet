@@ -11,6 +11,15 @@ import scala.annotation.tailrec
 
 object Structurer {
 
+  def structureStart(cfg: CFG[SIRBlock]): SIRStructuredBlock = {
+    val start = SIRStructuredBlock.UnprocessedBlock(cfg.start)
+    val nodes = cfg.graph.nodes.map(SIRStructuredBlock.UnprocessedBlock(_))
+    val edges = cfg.graph.edges.map(e => SIRStructuredBlock.UnprocessedBlock(e.from.value) ~> SIRStructuredBlock.UnprocessedBlock(e.to.value))
+
+    structure(Graph.from(nodes, edges), start)
+  }
+
+
   @tailrec
   def structure(graph: Graph[SIRStructuredBlock, DiEdge], start: SIRStructuredBlock, n: Int = 0): SIRStructuredBlock = {
     if (graph.nodes.size == 1) graph.nodes.head
@@ -62,8 +71,10 @@ object Structurer {
     }
   }
 
-  def dominatedBy(graph: Graph[SIRStructuredBlock, DiEdge])(start: graph.NodeT, node: graph.NodeT): Set[graph.NodeT] =
-    ???
+  def dominatedBy(graph: Graph[SIRStructuredBlock, DiEdge])(start: graph.NodeT, node: graph.NodeT): Set[graph.NodeT] = {
+    val tree = CFG.dominatorTree(graph)(start)
+    tree.get(node).outerNodeTraverser().toSet.map((v: SIRStructuredBlock) => graph.get(v))
+  }
 
   def findBackEdges(graph: Graph[SIRStructuredBlock, DiEdge])(node: graph.NodeT): Set[graph.EdgeT] = {
     def dfsWgb(

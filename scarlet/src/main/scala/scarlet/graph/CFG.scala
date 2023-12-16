@@ -13,6 +13,7 @@ import scarlet.ir.OPCodeToSIR.CodeWithStack
 import scarlet.ir.SIR
 
 import scala.collection.immutable.{LongMap, TreeMap}
+import scala.collection.mutable
 import scala.reflect.ClassTag
 
 case class CFG[Elem](graph: Graph[Elem, DiEdge], start: Elem)
@@ -268,5 +269,111 @@ object CFG {
     }
     val nodes = scc.nodes.map(node => componentToGraph(node.value))
     Graph.from(nodes, edges)
+  }
+
+  def dominatorTree[N](graph: Graph[N, DiEdge])(start: graph.NodeT): Graph[N, DiEdge] = {
+    val parent   = mutable.Map.empty[graph.NodeT, graph.NodeT]
+    val ancestor = mutable.Map.empty[graph.NodeT, graph.NodeT]
+    val child    = mutable.Map.empty[graph.NodeT, graph.NodeT]
+    val vertex   = mutable.Seq.fill[graph.NodeT](graph.nodes.size)(null.asInstanceOf[graph.NodeT])
+
+    val label = mutable.Map.empty[graph.NodeT, graph.NodeT]
+    val semi  = mutable.Map.empty[graph.NodeT, Int]
+    val size  = mutable.Map.empty[graph.NodeT, Int].withDefaultValue(1)
+
+    val bucket = mutable.Map.empty[graph.NodeT, Set[graph.NodeT]]
+    val dom    = mutable.Map.empty[graph.NodeT, graph.NodeT]
+
+    def dfs(v: graph.NodeT, n: Int): Int = {
+      semi(v) = n + 1
+      vertex(n) = v
+      label(v) = v
+
+      v.diSuccessors.foldLeft(n + 1) { (w, node) =>
+        if (semi(node) == 0) {
+          parent(node) = v
+          dfs(node, w)
+        } else w
+      }
+    }
+
+    val n = dfs(start, 0)
+
+    def link(v: graph.NodeT, w: graph.NodeT): Unit = {
+      var s = w
+      while (semi(label(w)) < semi(label(child(s)))) {
+        if (size(s) + size(child(child(s))) >= 2 * size(child(s))) {
+          ancestor(child(s)) = s
+          child(s) = child(child(s))
+        } else {
+          size(child(s)) = size(s)
+          ancestor(s) = child(s)
+          s = ancestor(s)
+        }
+      }
+
+      label(s) = label(w)
+      size(v) = size(v) + size(w)
+      if (size(v) < 2 * size(w)) {
+        child(v) = child(v)
+      }
+
+      while (s != 0) {
+        ancestor(s) = v
+        s = child(s)
+      }
+    }
+
+    def eval(v: graph.NodeT): graph.NodeT = {
+      if (ancestor(v) == 0) {
+        label(v)
+      } else {
+        compress(v)
+        if (semi(label(ancestor(v))) >= semi(label(v))) {
+          label(v)
+        } else {
+          label(ancestor(v))
+        }
+      }
+    }
+
+    def compress(v: graph.NodeT): Unit = {
+      if (ancestor(ancestor(v)) != 0) {
+        compress(ancestor(v))
+        if (semi(label(ancestor(v))) < semi(label(v))) {
+          label(v) = label(ancestor(v))
+        }
+        ancestor(v) = ancestor(ancestor(v))
+      }
+    }
+
+    (n until 2 by -1).foreach { i =>
+      val w = vertex(i)
+      w.diPredecessors.foreach { v =>
+        val u = eval(v)
+        if (semi(u) < semi(w)) {
+          semi(w) = semi(u)
+        }
+      }
+      link(parent(w), w)
+      bucket(parent(w)).foreach { v =>
+        val u = eval(v)
+        dom(v) = if (semi(u) < semi(v)) u else parent(w)
+      }
+    }
+
+    (2 until n).foreach { i =>
+      if (dom(vertex(i)) != vertex(semi(vertex(i)))) {
+        dom(vertex(i)) = dom(dom(vertex(i)))
+      }
+    }
+
+    dom(start) = start
+
+    val edges = graph.nodes.map { node =>
+      dom(dom(node)).value ~> dom(node).value
+    }.diff(Set(start.value ~> start.value))
+
+    Graph.from(edges = edges)
   }
 }
